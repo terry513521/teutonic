@@ -1,0 +1,665 @@
+This script is a **Teutonic subnet miner** for Bittensor. Its purpose is:
+
+1. Find the current "king" model.
+2. Download that model.
+3. Create a slightly modified challenger model.
+4. Upload the challenger to Hippius Hub.
+5. Submit an on-chain reveal commitment so validators can evaluate it.
+
+The current implementation is a **pipeline test miner**. It doesn't actually improve the model—it simply adds random noise to the weights.
+
+---
+
+# High-Level Flow
+
+```text
+Start
+  │
+  ├── Connect to Bittensor
+  │
+  ├── Verify wallet & hotkey
+  │
+  ├── Discover current king model
+  │
+  ├── Download king model
+  │
+  ├── Create challenger model
+  │      └── Add Gaussian noise to weights
+  │
+  ├── Validate config
+  │
+  ├── Upload challenger
+  │
+  ├── Submit reveal commitment
+  │
+  └── Wait for validator evaluation
+```
+
+---
+
+# Imports
+
+```python
+import bittensor as bt
+import httpx
+import torch
+from safetensors.torch import load_file, save_file
+```
+
+Main dependencies:
+
+| Library     | Purpose                     |
+| ----------- | --------------------------- |
+| bittensor   | Blockchain interaction      |
+| httpx       | HTTP requests               |
+| torch       | Tensor manipulation         |
+| safetensors | Model weight loading/saving |
+
+---
+
+# Configuration
+
+```python
+DASHBOARD_URL
+SEED_REPO
+SEED_DIGEST
+NETUID
+NETWORK
+WALLET_NAME
+```
+
+Example:
+
+```python
+NETWORK="finney"
+NETUID=3
+```
+
+These define:
+
+* Which subnet to mine
+* Which chain to connect to
+* Default seed model
+
+---
+
+# validate_local_config()
+
+This function ensures the challenger model has the same architecture as the king.
+
+---
+
+## Checks config.json
+
+```python
+king_cfg_path = Path(king_dir) / "config.json"
+chall_cfg_path = Path(challenger_dir) / "config.json"
+```
+
+Loads both configs.
+
+---
+
+## Architecture Match
+
+```python
+king_arch = king_cfg.get("architectures", [])
+chall_arch = chall_cfg.get("architectures", [])
+```
+
+Example:
+
+```json
+{
+  "architectures": [
+    "LlamaForCausalLM"
+  ]
+}
+```
+
+If architectures differ:
+
+```python
+return "architecture mismatch"
+```
+
+---
+
+## Critical Parameters Match
+
+```python
+CONFIG_MATCH_KEYS
+```
+
+Contains:
+
+```python
+(
+ "vocab_size",
+ "hidden_size",
+ "num_hidden_layers",
+ "num_attention_heads",
+ ...
+)
+```
+
+The validator expects:
+
+```text
+King:
+  hidden_size = 4096
+
+Challenger:
+  hidden_size = 2048
+
+❌ Reject
+```
+
+because weight shapes won't match.
+
+---
+
+## Check Safetensors Exist
+
+```python
+*.safetensors
+```
+
+If none exist:
+
+```python
+return "no .safetensors files"
+```
+
+---
+
+# Argument Parsing
+
+```python
+parser.add_argument("--hotkey")
+parser.add_argument("--noise")
+parser.add_argument("--suffix")
+parser.add_argument("--force")
+```
+
+Example:
+
+```bash
+python miner.py \
+  --hotkey h0 \
+  --noise 0.001
+```
+
+---
+
+# Build Challenger Repository Name
+
+```python
+challenger_repo =
+    f"{namespace}/{chain_config.NAME}-{suffix}"
+```
+
+Example:
+
+```text
+unconst/teutonic-h0
+```
+
+---
+
+# Connect to Bittensor
+
+```python
+wallet = bt.Wallet(...)
+subtensor = bt.Subtensor(...)
+```
+
+Gets:
+
+```python
+my_hotkey = wallet.hotkey.ss58_address
+```
+
+Example:
+
+```text
+5F3sa2TJ...
+```
+
+---
+
+# Registration Check
+
+```python
+meta = subtensor.metagraph(NETUID)
+```
+
+Obtains subnet participants.
+
+Checks:
+
+```python
+if my_hotkey not in meta.hotkeys
+```
+
+If not registered:
+
+```text
+Abort
+```
+
+because only registered miners can compete.
+
+---
+
+# Discover Current King
+
+Downloads dashboard:
+
+```python
+resp = httpx.get(DASHBOARD_URL)
+dashboard = resp.json()
+```
+
+Expected:
+
+```json
+{
+  "king": {
+    "model_repo": "...",
+    "king_digest": "...",
+    "hotkey": "..."
+  }
+}
+```
+
+Extracts:
+
+```python
+king_repo
+king_digest
+```
+
+---
+
+# Current King Protection
+
+Checks:
+
+```python
+if my_hotkey == king_hotkey
+```
+
+Meaning:
+
+```text
+You are already king.
+```
+
+Validator would ignore your challenge.
+
+---
+
+# Existing Reveal Check
+
+```python
+subtensor.get_all_revealed_commitments()
+```
+
+Checks whether this hotkey already submitted.
+
+Purpose:
+
+```text
+Avoid spam submissions.
+```
+
+---
+
+# Download King Model
+
+Creates:
+
+```python
+/tmp/teutonic/miner/king
+```
+
+Then:
+
+```python
+materialize_model(
+    king_ref,
+    local_dir=king_dir
+)
+```
+
+Downloads all files.
+
+Example:
+
+```text
+config.json
+tokenizer.json
+model.safetensors
+```
+
+---
+
+# Create Challenger
+
+Copies king:
+
+```python
+shutil.copytree(
+    king_dir,
+    challenger_dir
+)
+```
+
+Now challenger is identical.
+
+---
+
+# Find Safetensors Files
+
+```python
+st_files =
+    sorted(Path(challenger_dir).glob("*.safetensors"))
+```
+
+Example:
+
+```text
+model-00001.safetensors
+model-00002.safetensors
+```
+
+---
+
+# Perturb Weights
+
+This is the core "training" step.
+
+```python
+sd = load_file(str(st_file))
+```
+
+Loads tensors:
+
+```python
+{
+   "layers.0.attn.q_proj.weight": tensor(...),
+   ...
+}
+```
+
+---
+
+## Iterate Through Tensors
+
+```python
+for name, tensor in sd.items():
+```
+
+---
+
+## Float Tensors Only
+
+```python
+if tensor.dtype in (
+    torch.bfloat16,
+    torch.float16,
+    torch.float32
+)
+```
+
+Examples:
+
+```text
+✓ weights
+✓ embeddings
+✓ layernorm
+
+✗ int tensors
+```
+
+---
+
+## Generate Noise
+
+```python
+noise =
+    torch.randn_like(
+        tensor.float()
+    ) * args.noise
+```
+
+`randn_like()` generates Gaussian noise.
+
+Example:
+
+```text
+tensor value = 0.4321
+
+noise = 0.0008
+
+new value = 0.4329
+```
+
+---
+
+## Apply Noise
+
+```python
+tensor.float() + noise
+```
+
+Then cast back:
+
+```python
+.to(tensor.dtype)
+```
+
+Preserves original precision.
+
+---
+
+## Save File
+
+```python
+save_file(
+    new_sd,
+    str(st_file)
+)
+```
+
+Now the challenger differs from the king.
+
+---
+
+# Why This Won't Win
+
+The author explicitly states:
+
+```python
+Noise perturbation will not clear delta
+```
+
+Because:
+
+```text
+King:
+  trained model
+
+Challenger:
+  trained model + random noise
+```
+
+Performance becomes slightly worse.
+
+Validators compare quality.
+
+Result:
+
+```text
+King wins
+```
+
+Almost always.
+
+---
+
+# Local Validation
+
+```python
+rejection =
+    validate_local_config(...)
+```
+
+Ensures:
+
+```text
+same architecture
+same dimensions
+valid weights
+```
+
+before upload.
+
+---
+
+# Upload Challenger
+
+```python
+challenger_ref =
+    upload_model_folder(...)
+```
+
+Uploads to Hippius Hub.
+
+Example result:
+
+```text
+unconst/teutonic-h0
+```
+
+with immutable digest:
+
+```text
+sha256:abcd1234...
+```
+
+---
+
+# Build Reveal Payload
+
+```python
+payload =
+    build_reveal_v4(
+        challenger_ref,
+        my_hotkey
+    )
+```
+
+Comment explains format:
+
+```text
+v4|
+repo|
+digest|
+author_hotkey
+```
+
+Example:
+
+```text
+v4|
+unconst/teutonic-h0|
+sha256:abc123|
+5F3sa2TJ...
+```
+
+---
+
+# Submit Commitment
+
+```python
+subtensor.set_reveal_commitment(...)
+```
+
+Parameters:
+
+```python
+netuid=NETUID
+data=payload
+blocks_until_reveal=3
+```
+
+Meaning:
+
+```text
+Commit now
+Reveal after 3 blocks
+```
+
+This is a commit-reveal scheme used to prevent front-running.
+
+---
+
+# Success Path
+
+```python
+if resp.success:
+```
+
+Outputs:
+
+```text
+reveal committed
+validator will pick this up
+```
+
+Then validators:
+
+1. Download challenger.
+2. Verify digest.
+3. Evaluate model.
+4. Compare against king.
+5. Potentially dethrone the king.
+
+---
+
+# Most Important Part
+
+This section is intentionally a placeholder:
+
+```python
+for name, tensor in sd.items():
+    noise = torch.randn_like(...)
+    new_sd[name] = tensor + noise
+```
+
+A real miner would replace it with something like:
+
+```python
+Load king model
+↓
+Fine-tune on dataset
+↓
+Save updated weights
+↓
+Upload challenger
+↓
+Submit reveal
+```
+
+Possible strategies include:
+
+* LoRA fine-tuning
+* Full fine-tuning
+* Distillation
+* RLHF
+* Domain adaptation
+* Quantization-aware retraining
+
+Everything else in the script (downloading the king, uploading to Hippius, generating digests, and submitting the reveal commitment) is the infrastructure around that training step. The actual competitive advantage comes from replacing the noise-perturbation block with a training pipeline that genuinely improves the model.

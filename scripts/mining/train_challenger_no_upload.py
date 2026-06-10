@@ -2,21 +2,22 @@
 """Train a Teutonic challenger and keep the merged model local.
 
 This is a no-upload variant of train_challenger.py. It downloads the current
-king, builds the training curriculum, trains/merges/evaluates challengers, and
-writes the final verdict JSON. It intentionally has no --upload-repo flag and
-never pushes the merged model to Hugging Face.
+king from Hippius Hub, builds the training curriculum, trains/merges/evaluates
+challengers, and writes the final verdict JSON. It intentionally has no upload
+flag and never pushes the merged model to a remote Hub.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import time
 from pathlib import Path
 
 import numpy as np
-from huggingface_hub import snapshot_download
+import torch
+from hippius_hub import snapshot_download
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from train_challenger import (
     fetch_king,
@@ -24,12 +25,21 @@ from train_challenger import (
     download_shard,
     load_shard,
     log,
-    merge_lora,
     paired_eval,
     run_lora_training,
     score_and_curate,
     sha256_dir,
 )
+
+HIPPIUS_MODEL_ALLOW_PATTERNS = [
+    "*.safetensors",
+    "*.json",
+    "*.py",
+    "tokenizer*",
+    "special_tokens*",
+    "*.model",
+    "*.txt",
+]
 
 
 def parse_false_only(value: str) -> bool:
@@ -38,6 +48,54 @@ def parse_false_only(value: str) -> bool:
             "train_challenger_no_upload.py does not implement noise-only training"
         )
     return False
+
+
+def download_king_from_hippius(king: dict, out_dir: Path, max_workers: int) -> tuple[str, str]:
+    repo = king.get("model_repo") or king.get("hf_repo")
+    if not repo:
+        raise KeyError(f"dashboard king missing model_repo/hf_repo; keys={sorted(king.keys())}")
+    revision = king.get("king_digest") or king.get("king_revision") or king.get("revision") or ""
+
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info("downloading king from Hippius: repo=%s revision=%s -> %s",
+             repo, (revision or "HEAD")[:19], out_dir)
+    snapshot_download(
+        repo_id=repo,
+        revision=revision or None,
+        local_dir=str(out_dir),
+        allow_patterns=HIPPIUS_MODEL_ALLOW_PATTERNS,
+        ignore_patterns="optimizer*",
+        max_workers=max_workers,
+    )
+    return repo, revision
+
+
+def merge_lora_local(base_model: str, adapter: Path, out: Path) -> Path:
+    log.info("merging LoRA %s into %s -> %s", adapter, base_model, out)
+    from peft import PeftModel
+
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model, torch_dtype=torch.bfloat16, use_safetensors=True,
+    )
+    merged = PeftModel.from_pretrained(base, str(adapter)).merge_and_unload()
+    out.mkdir(parents=True, exist_ok=True)
+    merged.save_pretrained(str(out), safe_serialization=True)
+    tok = AutoTokenizer.from_pretrained(base_model, use_fast=True)
+    tok.save_pretrained(str(out))
+
+    # Preserve local Hippius snapshot config/code metadata without calling HF.
+    for pattern in ("config.json", "*.py"):
+        for src in Path(base_model).glob(pattern):
+            if src.is_file():
+                shutil.copy(src, out / src.name)
+
+    del base, merged
+    torch.cuda.empty_cache()
+    log.info("merged model saved to %s", out)
+    return out
 
 
 def main():
@@ -71,7 +129,8 @@ def main():
     ap.add_argument("--n-gpus", type=int, default=8)
     ap.add_argument("--noise-only", type=parse_false_only, default=False,
                     help="Compatibility no-op; only false/0/no is accepted")
-    ap.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""))
+    ap.add_argument("--download-workers", type=int, default=1,
+                    help="Parallel workers for Hippius model download")
     ap.add_argument("--report-out", default="",
                     help="Write a final JSON verdict to this path")
     args = ap.parse_args()
@@ -84,14 +143,9 @@ def main():
     # 1. king
     king = fetch_king()
     king_dir = work / "king"
-    if king_dir.exists():
-        shutil.rmtree(king_dir)
-    king_repo = king["hf_repo"]
-    king_revision = king.get("king_revision") or king.get("revision")
-    log.info("downloading king to %s", king_dir)
-    snapshot_download(king_repo, local_dir=str(king_dir),
-                      revision=king_revision or None,
-                      token=args.hf_token or None, max_workers=16)
+    king_repo, king_revision = download_king_from_hippius(
+        king, king_dir, args.download_workers,
+    )
     king_hash = sha256_dir(king_dir)
     log.info("king sha256[:16]=%s", king_hash[:16])
 
@@ -145,7 +199,7 @@ def main():
 
         # 6. merge
         merged_dir = iter_work / "merged"
-        merge_lora(str(king_dir), adapter, merged_dir)
+        merge_lora_local(str(king_dir), adapter, merged_dir)
 
         # 7. paired eval
         verdict = paired_eval(
