@@ -103,22 +103,22 @@ DEFAULT_DATASETS = [
     {
         "name": "automathtext-v2",
         "manifest_url": "https://eu-central-1.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
-        "weight": 0.35,
+        "weight": 0.3854166667,
     },
     {
         "name": "quasar-sn3",
         "manifest_url": "https://us-east-1.hippius.com/teutonic-sn3/dataset/quasar-sn3-retok/manifest.json",
-        "weight": 0.05,
+        "weight": 0.3333333333,
     },
     {
         "name": "ultradata-math",
         "manifest_url": "https://us-east-1.hippius.com/teutonic-sn3/dataset/ultradata-math-quasar-10b/manifest.json",
-        "weight": 0.35,
+        "weight": 0.125,
     },
     {
         "name": "finewebedu",
         "manifest_url": FINEWEBEDU_MANIFEST_URL,
-        "weight": 0.25,
+        "weight": 0.15625,
     },
 ]
 
@@ -547,6 +547,54 @@ def score_and_curate(king_dir: str, shards: list[np.ndarray],
 # ---------------------------------------------------------------------------
 # Multi-GPU LoRA training (delegated to torchrun)
 # ---------------------------------------------------------------------------
+def _has_adapter_weights(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and (path / "adapter_config.json").is_file()
+        and (
+            (path / "adapter_model.safetensors").is_file()
+            or (path / "adapter_model.bin").is_file()
+        )
+    )
+
+
+def _checkpoint_step(path: Path) -> int:
+    try:
+        return int(path.name.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        return -1
+
+
+def _resolve_lora_adapter(out_dir: Path) -> Path:
+    """Prefer the trainer's best checkpoint, then best_adapter, then latest checkpoint."""
+    trainer_states = []
+    if (out_dir / "trainer_state.json").exists():
+        trainer_states.append(out_dir / "trainer_state.json")
+    trainer_states.extend(sorted(out_dir.glob("checkpoint-*/trainer_state.json")))
+
+    for state_path in sorted(trainer_states, key=lambda p: _checkpoint_step(p.parent), reverse=True):
+        try:
+            state = json.loads(state_path.read_text())
+        except Exception as exc:
+            log.warning("could not read trainer state %s: %s", state_path, exc)
+            continue
+        best_checkpoint = state.get("best_model_checkpoint")
+        if best_checkpoint and _has_adapter_weights(Path(best_checkpoint)):
+            return Path(best_checkpoint)
+
+    best_adapter = out_dir / "best_adapter"
+    if _has_adapter_weights(best_adapter):
+        return best_adapter
+    if _has_adapter_weights(out_dir):
+        return out_dir
+
+    for checkpoint in sorted(out_dir.glob("checkpoint-*"), key=_checkpoint_step, reverse=True):
+        if _has_adapter_weights(checkpoint):
+            return checkpoint
+
+    raise RuntimeError(f"no adapter found in {out_dir}")
+
+
 def run_lora_training(base_model: str, train_p: Path, val_p: Path,
                       out_dir: Path, n_gpus: int, args: argparse.Namespace,
                       bundle: Path) -> Path:
@@ -564,25 +612,30 @@ def run_lora_training(base_model: str, train_p: Path, val_p: Path,
         "--grad-accum", str(args.grad_accum),
         "--learning-rate", str(args.lr),
         "--epochs", str(args.epochs),
+        "--warmup-ratio", str(getattr(args, "warmup_ratio", 0.03)),
         "--lora-r", str(args.lora_r),
         "--lora-alpha", str(args.lora_alpha),
         "--lora-dropout", "0.05",
+        "--eval-steps", str(getattr(args, "eval_steps", 50)),
+        "--save-steps", str(getattr(args, "save_steps", getattr(args, "eval_steps", 50))),
         "--save-total-limit", str(getattr(args, "save_total_limit", 0)),
     ]
+    lora_target_modules = getattr(args, "lora_target_modules", "")
+    if lora_target_modules:
+        cmd.extend(["--lora-target-modules", str(lora_target_modules)])
     log.info("training: %s", " ".join(cmd))
     t0 = time.time()
-    subprocess.check_call(cmd)
-    log.info("training done in %.1fs", time.time() - t0)
-    adapter = out_dir / "best_adapter"
-    if not adapter.exists():
-        # Trainer.save_model may have only put the adapter in the root output_dir.
-        # Look for adapter_model files.
-        if (out_dir / "adapter_model.safetensors").exists() or \
-           (out_dir / "adapter_model.bin").exists():
-            adapter = out_dir
-        else:
-            raise RuntimeError(f"no adapter found in {out_dir}")
-    return adapter
+    try:
+        subprocess.check_call(cmd)
+        log.info("training done in %.1fs", time.time() - t0)
+    except subprocess.CalledProcessError:
+        adapter = _resolve_lora_adapter(out_dir)
+        log.warning(
+            "training command failed, but found adapter checkpoint to continue: %s",
+            adapter,
+        )
+        return adapter
+    return _resolve_lora_adapter(out_dir)
 
 
 def merge_lora(base_model: str, adapter: Path, out: Path) -> Path:

@@ -17,9 +17,9 @@ def main() -> None:
                     help="Scored sample JSONL; defaults to <work>/scored_samples.jsonl")
     ap.add_argument("--out-dir", default="",
                     help="Curriculum output dir; defaults to <work>/curriculum")
-    ap.add_argument("--train-per-iter", type=int, default=20000,
+    ap.add_argument("--train-per-iter", type=int, default=15000,
                     help="Training sequences to keep after bucketing")
-    ap.add_argument("--val-size", type=int, default=2000,
+    ap.add_argument("--val-size", type=int, default=600,
                     help="Validation sequences to keep after bucketing")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Step 1: download the current king directly from a Hippius Hub model link."""
+"""Step 1: download a specific king directly from a Hippius Hub model link."""
 from __future__ import annotations
 
 import argparse
@@ -10,11 +10,8 @@ from challenger_step_lib import download_king_from_hippius, write_king_metadata
 from train_challenger import log
 
 
-DEFAULT_KING_URL = (
-    "https://hub.hippius.com/models/"
-    "mastertensor/teutonic-q3-10b-5ek5koe5-45621114678-rn"
-)
-DEFAULT_KING_REVISION = "5Ek5KoE5-45621114678-rn"
+DEFAULT_KING_URL = ""
+DEFAULT_KING_REVISION = ""
 
 
 def repo_from_hub_link(model: str) -> str:
@@ -42,7 +39,7 @@ def repo_from_hub_link(model: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--work", default="/root/teutonic-mining/work",
+    ap.add_argument("--work", default="/workspace/teutonic-mining/work",
                     help="Pipeline work directory")
     ap.add_argument("--king-dir", default="",
                     help="Output model directory; defaults to <work>/king")
@@ -57,6 +54,13 @@ def main() -> None:
     ap.add_argument("--revision", default=DEFAULT_KING_REVISION,
                     help="Hippius model version/revision tag")
     args = ap.parse_args()
+
+    if not args.repo.strip() and not args.model_url.strip():
+        ap.error(
+            "--repo or --model-url is required for KING_SOURCE=hippius. "
+            "Use scripts/mining/step1_download_king.py, or /workspace/run/step1_download_king.sh "
+            "with default KING_SOURCE=dashboard, to fetch the live current king."
+        )
 
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)

@@ -130,13 +130,17 @@ def main():
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--learning-rate", type=float, default=2e-4)
     ap.add_argument("--epochs", type=float, default=3.0)
-    ap.add_argument("--warmup-ratio", type=float, default=0.02)
+    ap.add_argument("--warmup-ratio", type=float, default=0.03)
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
     ap.add_argument("--lora-dropout", type=float, default=0.05)
     ap.add_argument("--lora-target-modules", type=str, default=None,
                     help="comma-separated module name suffixes; defaults to a Quasar-aware set")
+    ap.add_argument("--eval-steps", type=int, default=50,
+                    help="Run validation every N optimizer steps")
+    ap.add_argument("--save-steps", type=int, default=50,
+                    help="Save checkpoints every N optimizer steps")
     ap.add_argument("--save-total-limit", type=int, default=0,
                     help="Max checkpoints to retain (0 = keep all)")
     args = ap.parse_args()
@@ -191,8 +195,8 @@ def main():
         lr_scheduler_type="cosine",
         logging_steps=10,
         eval_strategy="steps",
-        eval_steps=50,
-        save_steps=50,
+        eval_steps=args.eval_steps,
+        save_steps=args.save_steps,
         save_total_limit=args.save_total_limit or None,
         bf16=torch.cuda.is_available(),
         fp16=False,

@@ -25,11 +25,18 @@ def main() -> None:
                     help="LoRA output dir; defaults to <work>/lora_out")
     ap.add_argument("--n-gpus", type=int, default=1)
     ap.add_argument("--micro-batch", type=int, default=4)
-    ap.add_argument("--grad-accum", type=int, default=2)
-    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--grad-accum", type=int, default=4)
+    ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--epochs", type=float, default=2.0)
-    ap.add_argument("--lora-r", type=int, default=16)
-    ap.add_argument("--lora-alpha", type=int, default=32)
+    ap.add_argument("--warmup-ratio", type=float, default=0.03)
+    ap.add_argument("--lora-r", type=int, default=32)
+    ap.add_argument("--lora-alpha", type=int, default=64)
+    ap.add_argument("--lora-target-modules", default="",
+                    help="Comma-separated LoRA target module suffixes; empty uses training bundle defaults")
+    ap.add_argument("--eval-steps", type=int, default=150,
+                    help="Run validation every N optimizer steps")
+    ap.add_argument("--save-steps", type=int, default=150,
+                    help="Save checkpoints every N optimizer steps")
     ap.add_argument("--save-total-limit", type=int, default=0,
                     help="Max checkpoints to retain (0 = keep all)")
     ap.add_argument("--metadata-out", default="",
@@ -56,6 +63,16 @@ def main() -> None:
         "val_data": str(val_data),
         "lora_output_dir": str(output_dir),
         "adapter_dir": str(adapter),
+        "micro_batch": args.micro_batch,
+        "grad_accum": args.grad_accum,
+        "lr": args.lr,
+        "epochs": args.epochs,
+        "warmup_ratio": args.warmup_ratio,
+        "lora_r": args.lora_r,
+        "lora_alpha": args.lora_alpha,
+        "lora_target_modules": args.lora_target_modules,
+        "eval_steps": args.eval_steps,
+        "save_steps": args.save_steps,
     })
     log.info("step4 complete: adapter=%s metadata=%s", adapter, metadata_out)
 

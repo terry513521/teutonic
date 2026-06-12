@@ -1,0 +1,6 @@
+automathtext-v2: 0.35 -> 5 shard -> 600 samples / per shard
+quasar-sn3:      0.05 -> 1 shard 1200 samples / per shard
+ultradata-math:  0.35 -> 5 shard 600 samples / per shard
+finewebedu:      0.25 -> 2 shard 700 samples / per shard
+
+LORA_TARGET_MODULES=q_proj,k_proj,v_proj,o_proj

@@ -44,7 +44,9 @@ def read_json(path: str | Path) -> dict:
 def write_json(path: str | Path, data: dict) -> None:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(data, indent=2) + "\n")
+    tmp = out.with_name(f".{out.name}.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(out)
 
 
 def jsonl_rows(path: str | Path):
@@ -157,7 +159,20 @@ def score_samples(
     cands = []
     dataset_targets: dict[str, int] = {}
     dataset_to_shards: dict[str, list[int]] = collections.defaultdict(list)
-    if shard_records and any("target_samples" in record for record in shard_records):
+    per_shard_targets: dict[int, int] = {}
+    if shard_records and any("target_samples_per_shard" in record for record in shard_records):
+        for s_idx, record in enumerate(shard_records):
+            target = int(record.get("target_samples_per_shard", 0))
+            if target <= 0:
+                continue
+            per_shard_targets[s_idx] = target
+            shard = shards[s_idx]
+            if len(shard) == 0:
+                continue
+            idxs = rng.choice(len(shard), size=min(target, len(shard)), replace=False)
+            for j in idxs:
+                cands.append((s_idx, int(j)))
+    elif shard_records and any("target_samples" in record for record in shard_records):
         for s_idx, record in enumerate(shard_records):
             dataset = record.get("dataset", str(s_idx))
             dataset_to_shards[dataset].append(s_idx)
@@ -195,19 +210,27 @@ def score_samples(
 
     valid_cands = []
     valid_by_dataset: dict[str, int] = collections.defaultdict(int)
+    valid_by_shard: dict[int, int] = collections.defaultdict(int)
     invalid_count = 0
     for s_idx, j in cands:
         tokens = shards[s_idx][j]
         if int(tokens.min()) < 0 or int(tokens.max()) >= vocab_size:
             invalid_count += 1
             continue
-        if dataset_targets:
+        if per_shard_targets:
+            if valid_by_shard[s_idx] >= per_shard_targets[s_idx]:
+                continue
+            valid_by_shard[s_idx] += 1
+        elif dataset_targets:
             dataset = shard_records[s_idx].get("dataset", str(s_idx)) if shard_records else str(s_idx)
             if valid_by_dataset[dataset] >= dataset_targets[dataset]:
                 continue
             valid_by_dataset[dataset] += 1
         valid_cands.append((s_idx, j))
-        if dataset_targets:
+        if per_shard_targets:
+            if all(valid_by_shard[s_idx] >= target for s_idx, target in per_shard_targets.items()):
+                break
+        elif dataset_targets:
             if all(valid_by_dataset[d] >= target for d, target in dataset_targets.items()):
                 break
         elif len(valid_cands) >= n_score:
@@ -216,9 +239,10 @@ def score_samples(
     if invalid_count:
         log.info("dropped %d sampled sequences with token ids outside vocab_size=%d",
                  invalid_count, vocab_size)
-    if len(cands) < n_score:
+    expected_count = sum(per_shard_targets.values()) if per_shard_targets else n_score
+    if len(cands) < expected_count:
         log.warning("only %d/%d sampled sequences fit vocab_size=%d",
-                    len(cands), n_score, vocab_size)
+                    len(cands), expected_count, vocab_size)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     losses = []
@@ -249,6 +273,7 @@ def score_samples(
                     "dataset",
                     "dataset_weight",
                     "target_samples",
+                    "target_samples_per_shard",
                     "manifest_url",
                     "manifest_tokenizer",
                     "shard_idx",
@@ -315,8 +340,8 @@ def _select_bucket_mix(pool: list[dict], n_total: int, rng: np.random.Generator)
     general = [r for r in pool if r["bucket"] == "general"]
     hard = [r for r in pool if r["bucket"] == "hard"]
     easy = [r for r in pool if r["bucket"] == "easy"]
-    n_general = int(n_total * 0.6)
-    n_hard = int(n_total * 0.3)
+    n_general = int(n_total * 0.4)
+    n_hard = int(n_total * 0.5)
     n_easy = n_total - n_general - n_hard
     rows: list[dict] = []
     rows.extend(_sample_rows(rng, general, n_general))
@@ -366,8 +391,8 @@ def build_curriculum(
         clean_by_dataset: dict[str, list[dict]] = collections.defaultdict(list)
         for row in clean:
             clean_by_dataset[row.get("dataset", "unknown")].append(row)
-        for rows in clean_by_dataset.values():
-            rng.shuffle(rows)
+        for ds_rows in clean_by_dataset.values():
+            rng.shuffle(ds_rows)
 
         val_alloc = allocate_weighted_counts(val_size, weights)
         val_rows = []

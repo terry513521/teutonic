@@ -40,22 +40,47 @@ def select_shard_indices(
     seed: int,
     random_shards: bool,
     shard_start: int,
+    excluded_shards: set[int] | None = None,
 ) -> list[int]:
     if n_manifest_shards <= 0:
         raise ValueError("manifest has no shards")
-    if n_shards > n_manifest_shards:
+    excluded_shards = excluded_shards or set()
+    available = [idx for idx in range(n_manifest_shards) if idx not in excluded_shards]
+    if n_shards > len(available):
         raise ValueError(
-            f"requested {n_shards} shards, but manifest only has {n_manifest_shards}"
+            f"requested {n_shards} shards, but manifest only has {len(available)} "
+            f"available after excluding {sorted(excluded_shards)}"
         )
     if random_shards:
-        return sorted(random.Random(seed).sample(range(n_manifest_shards), n_shards))
-    end = shard_start + n_shards
-    if end > n_manifest_shards:
+        return sorted(random.Random(seed).sample(available, n_shards))
+
+    selected = []
+    idx = shard_start
+    while idx < n_manifest_shards and len(selected) < n_shards:
+        if idx not in excluded_shards:
+            selected.append(idx)
+        idx += 1
+    if len(selected) < n_shards:
         raise ValueError(
-            f"requested shard range [{shard_start}, {end}) exceeds manifest size "
-            f"{n_manifest_shards}"
+            f"requested {n_shards} sequential shards from start={shard_start}, "
+            f"but only selected {len(selected)} before manifest ended"
         )
-    return list(range(shard_start, end))
+    return selected
+
+
+def load_train_shard_exclusions(work: Path, path_arg: str) -> dict[str, set[int]]:
+    summary_path = Path(path_arg) if path_arg else work / "score_summary.json"
+    if not summary_path.exists():
+        return {}
+    summary = read_json(summary_path)
+    excluded: dict[str, set[int]] = {}
+    for record in summary.get("train_shards", []):
+        dataset = record.get("dataset")
+        shard_idx = record.get("shard_idx")
+        if dataset is None or shard_idx is None:
+            continue
+        excluded.setdefault(str(dataset), set()).add(int(shard_idx))
+    return excluded
 
 
 def load_eval_sets(
@@ -66,8 +91,10 @@ def load_eval_sets(
     seed: int,
     random_shards: bool,
     shard_start: int,
+    excluded_by_dataset: dict[str, set[int]] | None = None,
 ) -> list[dict]:
     eval_sets = []
+    excluded_by_dataset = excluded_by_dataset or {}
     for spec_idx, spec in enumerate(datasets):
         name = spec["name"]
         manifest_url = spec["manifest_url"]
@@ -75,19 +102,38 @@ def load_eval_sets(
         target_samples = int(sample_counts[name])
         dataset_cache = work / "cache" / "datasets" / name
         manifest = fetch_manifest_url(dataset_cache, manifest_url)
+        excluded_shards = excluded_by_dataset.get(name, set())
+        effective_shard_start = shard_start
+        available_after_exclusion = [
+            idx for idx in range(len(manifest["shards"]))
+            if idx not in excluded_shards
+        ]
+        if len(available_after_exclusion) < n_shards_per_dataset and excluded_shards:
+            log.warning(
+                "eval dataset %s has only %d held-out shards after excluding train shards %s; "
+                "allowing overlap for this dataset",
+                name,
+                len(available_after_exclusion),
+                sorted(excluded_shards),
+            )
+            excluded_shards = set()
+            if not random_shards and shard_start >= len(manifest["shards"]):
+                effective_shard_start = 0
         shard_indices = select_shard_indices(
             n_shards_per_dataset,
             len(manifest["shards"]),
             seed + spec_idx,
             random_shards,
-            shard_start,
+            effective_shard_start,
+            excluded_shards,
         )
         log.info(
-            "eval dataset %s: weight=%.2f target_samples=%d shards=%s",
+            "eval dataset %s: weight=%.2f target_samples=%d shards=%s excluded_train_shards=%s",
             name,
             weight,
             target_samples,
             shard_indices,
+            sorted(excluded_shards),
         )
 
         shard = None
@@ -149,6 +195,8 @@ def main() -> None:
                     help="Index of first shard when not using --random-shards")
     ap.add_argument("--random-shards", action="store_true",
                     help="Randomly sample shards per dataset with --seed")
+    ap.add_argument("--train-summary", default="",
+                    help="Score summary JSON used to exclude train shards; defaults to <work>/score_summary.json")
     ap.add_argument("--n-eval", type=int, default=2000,
                     help="Total sequences for offline paired eval across datasets")
     ap.add_argument("--seed", type=int, default=42)
@@ -188,6 +236,12 @@ def main() -> None:
         for spec, count in zip(datasets, counts)
     }
     log.info("eval allocation across datasets: %s", sample_counts)
+    excluded_by_dataset = load_train_shard_exclusions(work, args.train_summary)
+    if excluded_by_dataset:
+        log.info("excluding train shards from eval: %s", {
+            dataset: sorted(shards)
+            for dataset, shards in sorted(excluded_by_dataset.items())
+        })
 
     eval_sets = load_eval_sets(
         work,
@@ -197,6 +251,7 @@ def main() -> None:
         args.seed,
         args.random_shards,
         args.shard_start,
+        excluded_by_dataset,
     )
 
     verdict = paired_eval_datasets(

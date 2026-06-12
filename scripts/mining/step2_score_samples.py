@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import random
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
-
-from huggingface_hub import snapshot_download
 
 from challenger_step_lib import read_json, score_samples, write_json
 from train_challenger import (
     DEFAULT_DATASETS,
-    allocate_weighted_counts,
     download_shard,
     fetch_manifest_url,
     load_shard,
@@ -23,10 +22,7 @@ from train_challenger import (
 )
 
 
-DEFAULT_KING_URL = (
-    "https://huggingface.co/"
-    "bluecolor/teutonic-q3-10b-5ek5koe5-10416140412-rn"
-)
+DEFAULT_KING_URL = ""
 DEFAULT_KING_REVISION = "main"
 MODEL_ALLOW_PATTERNS = [
     "*.safetensors",
@@ -38,6 +34,13 @@ MODEL_ALLOW_PATTERNS = [
     "*.model",
     "*.txt",
 ]
+DEFAULT_DATASET_PLAN = {
+    "automathtext-v2": {"n_shards": 10, "samples_per_shard": 740},
+    "quasar-sn3": {"n_shards": 1, "samples_per_shard": 6400},
+    "ultradata-math": {"n_shards": 4, "samples_per_shard": 600},
+    "finewebedu": {"n_shards": 6, "samples_per_shard": 500},
+}
+DEFAULT_MIN_FREE_GB = 5.0
 
 
 def repo_from_hf_link(model: str) -> str:
@@ -64,6 +67,33 @@ def has_transformers_model_files(path: Path) -> bool:
     if not path.is_dir() or not (path / "config.json").is_file():
         return False
     return any(path.glob(pattern) for pattern in ("*.safetensors", "*.bin"))
+
+
+def require_free_space(path: Path, min_free_gb: float) -> None:
+    if min_free_gb <= 0:
+        return
+    path.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(path)
+    free_gb = usage.free / 1e9
+    if free_gb < min_free_gb:
+        raise RuntimeError(
+            f"not enough free disk under {path}: {free_gb:.2f} GB available, "
+            f"need at least {min_free_gb:.2f} GB. Step2 writes token-heavy JSONL "
+            "and summary files; free space by deleting old merged models or dataset caches, "
+            "or rerun with --min-free-gb 0 to bypass this check."
+        )
+
+
+def snapshot_download_model(**kwargs) -> None:
+    try:
+        snapshot_download = importlib.import_module("huggingface_hub").snapshot_download
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "huggingface-hub is required only when step2 needs to download a missing king "
+            "model. Run /workspace/run/setup_finetune_env.sh or install huggingface-hub, "
+            "or run step1 first so --king-dir already contains a complete model."
+        ) from exc
+    snapshot_download(**kwargs)
 
 
 def king_repo_from_meta(meta: dict) -> str:
@@ -94,7 +124,7 @@ def candidate_king_meta_paths(work: Path) -> list[Path]:
     paths = [
         work / "king.json",
         work.parent / "work" / "king.json",
-        Path("/root/teutonic-mining/work/king.json"),
+        Path("/workspace/teutonic-mining/work/king.json"),
     ]
     unique = []
     seen = set()
@@ -116,20 +146,34 @@ def resolve_king_dir(
 ) -> tuple[Path, dict]:
     meta_path = work / "king.json"
     meta = {}
-    if not king_dir_arg:
-        for candidate in candidate_king_meta_paths(work):
-            if candidate.exists():
-                meta_path = candidate
-                meta = read_json(candidate)
-                break
+    for candidate in candidate_king_meta_paths(work):
+        if candidate.exists():
+            meta_path = candidate
+            meta = read_json(candidate)
+            break
 
     king_dir = Path(king_dir_arg) if king_dir_arg else Path(meta.get("king_dir", work / "king"))
 
     if has_transformers_model_files(king_dir):
+        if not meta:
+            meta.update({
+                "king_hash": sha256_dir(king_dir),
+                "king_dir": str(king_dir),
+            })
         return king_dir, meta
 
-    repo = repo_arg.strip() or king_repo_from_meta(meta) or repo_from_hf_link(model_url)
-    revision = revision_arg.strip() or king_revision_from_meta(meta) or DEFAULT_KING_REVISION
+    repo = repo_arg.strip() or king_repo_from_meta(meta)
+    revision = revision_arg.strip() or king_revision_from_meta(meta)
+    if not repo:
+        if model_url.strip():
+            repo = repo_from_hf_link(model_url)
+            revision = revision or DEFAULT_KING_REVISION
+        else:
+            raise FileNotFoundError(
+                f"king model dir is missing/incomplete: {king_dir}. "
+                "Run /workspace/run/step1_download_king.sh first, or pass --repo/--model-url "
+                "and --revision explicitly."
+            )
 
     log.info(
         "king model dir missing/incomplete, downloading repo=%s revision=%s -> %s",
@@ -138,7 +182,7 @@ def resolve_king_dir(
         king_dir,
     )
     king_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
+    snapshot_download_model(
         repo_id=repo,
         revision=revision or None,
         local_dir=str(king_dir),
@@ -170,7 +214,13 @@ def resolve_king_dir(
 
 def load_dataset_specs(datasets_config: str) -> list[dict]:
     if not datasets_config:
-        return [dict(spec) for spec in DEFAULT_DATASETS]
+        return [
+            {
+                **dict(spec),
+                **DEFAULT_DATASET_PLAN.get(spec["name"], {}),
+            }
+            for spec in DEFAULT_DATASETS
+        ]
     path = Path(datasets_config)
     data = json.loads(path.read_text()) if path.exists() else json.loads(datasets_config)
     if isinstance(data, dict):
@@ -178,6 +228,21 @@ def load_dataset_specs(datasets_config: str) -> list[dict]:
     if not isinstance(data, list) or not data:
         raise ValueError("datasets config must be a non-empty list")
     return data
+
+
+def target_samples_for_spec(spec: dict, fallback_total: int | None = None) -> int:
+    if "samples" in spec:
+        return int(spec["samples"])
+    if "target_samples" in spec:
+        return int(spec["target_samples"])
+    if "samples_per_shard" in spec:
+        return int(spec.get("n_shards", 1)) * int(spec["samples_per_shard"])
+    if fallback_total is not None:
+        return fallback_total
+    raise ValueError(
+        f"dataset {spec.get('name', '<unknown>')} needs samples, target_samples, "
+        "or samples_per_shard"
+    )
 
 
 def select_shard_indices(
@@ -204,6 +269,53 @@ def select_shard_indices(
     return list(range(shard_start, end))
 
 
+def cached_manifest_records(dataset_cache: Path, manifest: dict) -> list[tuple[int, dict, Path]]:
+    shards_dir = dataset_cache / "shards"
+    if not shards_dir.is_dir():
+        return []
+    cached_paths = sorted(
+        path
+        for path in shards_dir.glob("*.npy")
+        if path.is_file() and path.stat().st_size > 1024
+    )
+    manifest_by_name = {
+        Path(shard_info["key"]).name: (idx, shard_info)
+        for idx, shard_info in enumerate(manifest["shards"])
+    }
+    records = []
+    for path in cached_paths:
+        manifest_record = manifest_by_name.get(path.name)
+        if manifest_record is not None:
+            idx, shard_info = manifest_record
+            records.append((idx, shard_info, path))
+    return records
+
+
+def select_cached_records(
+    records: list[tuple[int, dict, Path]],
+    n_shards: int,
+    seed: int,
+    random_shards: bool,
+    shard_start: int,
+) -> list[tuple[int, dict, Path]]:
+    if n_shards > len(records):
+        raise ValueError(
+            f"requested {n_shards} cached shards, but only {len(records)} cached shards are available"
+        )
+    if random_shards:
+        return sorted(
+            random.Random(seed).sample(records, n_shards),
+            key=lambda item: item[2].name,
+        )
+    end = shard_start + n_shards
+    if end > len(records):
+        raise ValueError(
+            f"requested cached shard range [{shard_start}, {end}) exceeds cached shard count "
+            f"{len(records)}"
+        )
+    return records[shard_start:end]
+
+
 def load_weighted_dataset_shards(
     work: Path,
     datasets: list[dict],
@@ -212,6 +324,7 @@ def load_weighted_dataset_shards(
     seed: int,
     random_shards: bool,
     shard_start: int,
+    cache_only: bool,
 ) -> tuple[list, list[dict]]:
     shards = []
     shard_records = []
@@ -222,29 +335,64 @@ def load_weighted_dataset_shards(
         manifest_url = spec["manifest_url"]
         weight = float(spec["weight"])
         target_samples = int(sample_counts[name])
+        samples_per_shard = int(spec.get("samples_per_shard", 0) or 0)
+        n_shards = int(spec.get("n_shards", n_shards_per_dataset))
         dataset_cache = work / "cache" / "datasets" / name
         manifest = fetch_manifest_url(dataset_cache, manifest_url)
-        shard_indices = select_shard_indices(
-            n_shards_per_dataset,
-            len(manifest["shards"]),
-            seed + spec_idx,
-            random_shards,
-            shard_start,
-        )
-        log.info(
-            "dataset %s: weight=%.2f target_samples=%d shards=%s tokenizer=%s",
-            name,
-            weight,
-            target_samples,
-            shard_indices,
-            manifest.get("tokenizer"),
-        )
+        selected_records: list[tuple[int, dict, Path]]
+        if cache_only:
+            cached_records = cached_manifest_records(dataset_cache, manifest)
+            selected_records = select_cached_records(
+                cached_records,
+                n_shards,
+                seed + spec_idx,
+                random_shards,
+                shard_start,
+            )
+        else:
+            shard_indices = select_shard_indices(
+                n_shards,
+                len(manifest["shards"]),
+                seed + spec_idx,
+                random_shards,
+                shard_start,
+            )
+            selected_records = [
+                (
+                    manifest_shard_idx,
+                    manifest["shards"][manifest_shard_idx],
+                    dataset_cache / "shards" / Path(manifest["shards"][manifest_shard_idx]["key"]).name,
+                )
+                for manifest_shard_idx in shard_indices
+            ]
+        shard_indices = [idx for idx, _, _ in selected_records]
+        if cache_only:
+            log.info(
+                "dataset %s: weight=%.2f target_samples=%d samples_per_shard=%s cached_shards=%s tokenizer=%s",
+                name,
+                weight,
+                target_samples,
+                samples_per_shard or "auto",
+                [path.name for _, _, path in selected_records],
+                manifest.get("tokenizer"),
+            )
+        else:
+            log.info(
+                "dataset %s: weight=%.2f target_samples=%d samples_per_shard=%s shards=%s tokenizer=%s",
+                name,
+                weight,
+                target_samples,
+                samples_per_shard or "auto",
+                shard_indices,
+                manifest.get("tokenizer"),
+            )
 
-        for manifest_shard_idx in shard_indices:
-            shard_info = manifest["shards"][manifest_shard_idx]
+        for manifest_shard_idx, shard_info, path in selected_records:
             key = shard_info["key"]
-            path = dataset_cache / "shards" / Path(key).name
-            download_shard(key, path, manifest=manifest)
+            if cache_only:
+                log.info("using cached shard: %s", path)
+            else:
+                download_shard(key, path, manifest=manifest)
             arr, _ = load_shard(path)
             log.info(
                 "loaded dataset %s shard %d: %d sequences",
@@ -252,8 +400,7 @@ def load_weighted_dataset_shards(
                 manifest_shard_idx,
                 len(arr),
             )
-            shards.append(arr)
-            shard_records.append({
+            record = {
                 "dataset": name,
                 "dataset_weight": weight,
                 "target_samples": target_samples,
@@ -263,7 +410,11 @@ def load_weighted_dataset_shards(
                 "shard_key": key,
                 "path": str(path),
                 "source_file": shard_info.get("source_file"),
-            })
+            }
+            if samples_per_shard:
+                record["target_samples_per_shard"] = samples_per_shard
+            shards.append(arr)
+            shard_records.append(record)
             shard_idx += 1
 
     return shards, shard_records
@@ -280,12 +431,16 @@ def main() -> None:
     ap.add_argument("--n-shards-per-dataset", type=int, default=1,
                     help="Number of shards to download per dataset manifest")
     ap.add_argument("--shard-start", type=int, default=0,
-                    help="Index of first shard when not using --random-shards")
-    ap.add_argument("--random-shards", action="store_true",
-                    help="Randomly sample shards per dataset with --seed")
+                    help="Index of first shard only when using --sequential-shards")
+    ap.add_argument("--random-shards", dest="random_shards", action="store_true",
+                    default=True,
+                    help="Randomly sample shards per dataset with --seed (default)")
+    ap.add_argument("--sequential-shards", dest="random_shards", action="store_false",
+                    help="Select contiguous shard ranges starting at --shard-start")
     ap.add_argument("--n-score", type=int, default=20000,
-                    help="Total sequences to score across all datasets")
-    ap.add_argument("--seed", type=int, default=42)
+                    help="Total sequences to score when dataset specs do not set samples_per_shard")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed each run")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--model-url", default=DEFAULT_KING_URL,
                     help="Hugging Face model URL or repo to download if king is incomplete")
@@ -297,16 +452,24 @@ def main() -> None:
                     help="Hugging Face token; defaults to HF_TOKEN")
     ap.add_argument("--download-workers", type=int, default=16,
                     help="Parallel workers if step2 must download a missing/incomplete king")
+    ap.add_argument("--cache-only", action="store_true",
+                    help="Select dataset shards only from <work>/cache/datasets and never download missing shards")
     ap.add_argument("--scored-out", default="",
                     help="Output scored JSONL; defaults to <work>/scored_samples.jsonl")
     ap.add_argument("--summary-out", default="",
                     help="Output summary JSON; defaults to <work>/score_summary.json")
+    ap.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB,
+                    help="Require this much free disk before scoring (0 disables check)")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(0, 2**32 - 1)
+        log.info("no --seed provided; generated step2 seed=%d", args.seed)
 
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
     scored_out = Path(args.scored_out) if args.scored_out else work / "scored_samples.jsonl"
     summary_out = Path(args.summary_out) if args.summary_out else work / "score_summary.json"
+    require_free_space(scored_out.parent, args.min_free_gb)
 
     king_dir, king_meta = resolve_king_dir(
         work,
@@ -319,8 +482,20 @@ def main() -> None:
     )
 
     datasets = load_dataset_specs(args.datasets_config)
-    weights = [float(spec["weight"]) for spec in datasets]
-    counts = allocate_weighted_counts(args.n_score, weights)
+    explicit_counts = any(
+        key in spec
+        for spec in datasets
+        for key in ("samples", "target_samples", "samples_per_shard")
+    )
+    if explicit_counts:
+        counts = [target_samples_for_spec(spec) for spec in datasets]
+        n_score = sum(counts)
+    else:
+        from train_challenger import allocate_weighted_counts
+
+        weights = [float(spec["weight"]) for spec in datasets]
+        counts = allocate_weighted_counts(args.n_score, weights)
+        n_score = args.n_score
     sample_counts = {
         spec["name"]: count
         for spec, count in zip(datasets, counts)
@@ -335,12 +510,13 @@ def main() -> None:
         args.seed,
         args.random_shards,
         args.shard_start,
+        args.cache_only,
     )
 
     summary = score_samples(
         str(king_dir),
         shards,
-        args.n_score,
+        n_score,
         args.seed,
         args.device,
         scored_out,
@@ -353,6 +529,7 @@ def main() -> None:
         "king_hash": king_meta.get("king_hash"),
         "datasets_config": datasets,
         "sample_counts": sample_counts,
+        "n_score_requested": n_score,
         "train_shards": shard_records,
         "seed": args.seed,
     })
