@@ -34,11 +34,25 @@ MODEL_ALLOW_PATTERNS = [
     "*.model",
     "*.txt",
 ]
+DEFAULT_TARGET_SAMPLES_PER_DATASET = 10_000
+DEFAULT_SHARDS_PER_DATASET = 5
 DEFAULT_DATASET_PLAN = {
-    "automathtext-v2": {"n_shards": 10, "samples_per_shard": 740},
-    "quasar-sn3": {"n_shards": 1, "samples_per_shard": 6400},
-    "ultradata-math": {"n_shards": 4, "samples_per_shard": 600},
-    "finewebedu": {"n_shards": 6, "samples_per_shard": 500},
+    "automathtext-v2": {
+        "n_shards": DEFAULT_SHARDS_PER_DATASET,
+        "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
+    },
+    "quasar-sn3": {
+        "n_shards": DEFAULT_SHARDS_PER_DATASET,
+        "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
+    },
+    "ultradata-math": {
+        "n_shards": DEFAULT_SHARDS_PER_DATASET,
+        "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
+    },
+    "finewebedu": {
+        "n_shards": DEFAULT_SHARDS_PER_DATASET,
+        "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
+    },
 }
 DEFAULT_MIN_FREE_GB = 5.0
 
@@ -336,12 +350,23 @@ def load_weighted_dataset_shards(
         weight = float(spec["weight"])
         target_samples = int(sample_counts[name])
         samples_per_shard = int(spec.get("samples_per_shard", 0) or 0)
-        n_shards = int(spec.get("n_shards", n_shards_per_dataset))
+        requested_n_shards = int(spec.get("n_shards", n_shards_per_dataset))
         dataset_cache = work / "cache" / "datasets" / name
         manifest = fetch_manifest_url(dataset_cache, manifest_url)
         selected_records: list[tuple[int, dict, Path]]
         if cache_only:
             cached_records = cached_manifest_records(dataset_cache, manifest)
+            if not cached_records:
+                raise ValueError(f"dataset {name} has no cached shards under {dataset_cache}")
+            n_shards = min(requested_n_shards, len(cached_records))
+            if n_shards < requested_n_shards:
+                log.info(
+                    "dataset %s: requested %d cached shards but only %d available; using %d",
+                    name,
+                    requested_n_shards,
+                    len(cached_records),
+                    n_shards,
+                )
             selected_records = select_cached_records(
                 cached_records,
                 n_shards,
@@ -350,9 +375,19 @@ def load_weighted_dataset_shards(
                 shard_start,
             )
         else:
+            n_manifest_shards = len(manifest["shards"])
+            n_shards = min(requested_n_shards, n_manifest_shards)
+            if n_shards < requested_n_shards:
+                log.info(
+                    "dataset %s: requested %d shards but manifest has %d; using %d",
+                    name,
+                    requested_n_shards,
+                    n_manifest_shards,
+                    n_shards,
+                )
             shard_indices = select_shard_indices(
                 n_shards,
-                len(manifest["shards"]),
+                n_manifest_shards,
                 seed + spec_idx,
                 random_shards,
                 shard_start,
@@ -428,7 +463,7 @@ def main() -> None:
                     help="King model dir; defaults to king_dir in <work>/king.json or <work>/king")
     ap.add_argument("--datasets-config", default="",
                     help="Optional JSON file/list overriding DEFAULT_DATASETS")
-    ap.add_argument("--n-shards-per-dataset", type=int, default=1,
+    ap.add_argument("--n-shards-per-dataset", type=int, default=DEFAULT_SHARDS_PER_DATASET,
                     help="Number of shards to download per dataset manifest")
     ap.add_argument("--shard-start", type=int, default=0,
                     help="Index of first shard only when using --sequential-shards")

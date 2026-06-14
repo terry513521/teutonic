@@ -623,6 +623,10 @@ def run_lora_training(base_model: str, train_p: Path, val_p: Path,
     lora_target_modules = getattr(args, "lora_target_modules", "")
     if lora_target_modules:
         cmd.extend(["--lora-target-modules", str(lora_target_modules)])
+    if getattr(args, "use_dora", False):
+        cmd.append("--use-dora")
+    if getattr(args, "use_rslora", False):
+        cmd.append("--use-rslora")
     log.info("training: %s", " ".join(cmd))
     t0 = time.time()
     try:

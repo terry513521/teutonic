@@ -137,6 +137,10 @@ def main():
     ap.add_argument("--lora-dropout", type=float, default=0.05)
     ap.add_argument("--lora-target-modules", type=str, default=None,
                     help="comma-separated module name suffixes; defaults to a Quasar-aware set")
+    ap.add_argument("--use-dora", action="store_true",
+                    help="Enable DoRA magnitude decomposition")
+    ap.add_argument("--use-rslora", action="store_true",
+                    help="Enable rank-stabilized LoRA scaling")
     ap.add_argument("--eval-steps", type=int, default=50,
                     help="Run validation every N optimizer steps")
     ap.add_argument("--save-steps", type=int, default=50,
@@ -176,6 +180,8 @@ def main():
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=target_modules,
+        use_dora=args.use_dora,
+        use_rslora=args.use_rslora,
     )
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()

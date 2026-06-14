@@ -33,6 +33,10 @@ def main() -> None:
     ap.add_argument("--lora-alpha", type=int, default=64)
     ap.add_argument("--lora-target-modules", default="",
                     help="Comma-separated LoRA target module suffixes; empty uses training bundle defaults")
+    ap.add_argument("--use-dora", action="store_true",
+                    help="Enable DoRA magnitude decomposition in PEFT LoRA")
+    ap.add_argument("--use-rslora", action="store_true",
+                    help="Enable rank-stabilized LoRA scaling in PEFT")
     ap.add_argument("--eval-steps", type=int, default=150,
                     help="Run validation every N optimizer steps")
     ap.add_argument("--save-steps", type=int, default=150,
@@ -71,6 +75,8 @@ def main() -> None:
         "lora_r": args.lora_r,
         "lora_alpha": args.lora_alpha,
         "lora_target_modules": args.lora_target_modules,
+        "use_dora": args.use_dora,
+        "use_rslora": args.use_rslora,
         "eval_steps": args.eval_steps,
         "save_steps": args.save_steps,
     })

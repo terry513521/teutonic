@@ -55,22 +55,24 @@ include:
 
 ## Useful overrides
 
-`step2_score_samples.py` defaults to this scoring plan:
+`step2_score_samples.py` defaults to 10,000 samples per dataset source,
+selecting up to 5 shards per source:
 
-- `automathtext-v2`: 10 shards, 740 samples per shard
-- `quasar-sn3`: 1 shard, 6400 samples per shard
-- `ultradata-math`: 4 shards, 600 samples per shard
-- `finewebedu`: 6 shards, 500 samples per shard
+- `automathtext-v2`: 10,000 samples across up to 5 shards
+- `quasar-sn3`: 10,000 samples across up to 5 shards
+- `ultradata-math`: 10,000 samples across up to 5 shards
+- `finewebedu`: 10,000 samples across up to 5 shards
 
-That produces 19,200 scored rows, distributed as `automathtext-v2` 38.54%,
-`quasar-sn3` 33.33%, `ultradata-math` 12.5%, and `finewebedu` 15.625%.
+That produces 40,000 scored rows. If a dataset source has only one available
+shard, Step 2 selects all 10,000 samples from that shard.
 Each row preserves the original
 `train_challenger.py` scoring format: `shard`, `idx`, `loss`, `unique_r`,
 `rep_r`, `rep_ng4`, and `tokens`, with dataset metadata added for weighted
-curriculum selection. Step 2 selects cached local shards randomly by default
-from `<work>/cache/datasets` and generates a new seed for each run unless you set
-`SEED`. It then selects samples randomly within each selected shard. It does not
-download missing dataset shards unless you set `CACHE_ONLY=0`.
+curriculum selection. Step 2 selects shards randomly by default and downloads
+missing dataset shards into `<work>/cache/datasets`. It generates a new seed for
+each run unless you set `SEED`, then selects samples randomly within each
+selected shard. Set `CACHE_ONLY=1` only when you want to restrict selection to
+already cached local shards.
 
 For reproducible shard/sample selection:
 
