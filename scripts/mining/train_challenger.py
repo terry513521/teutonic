@@ -53,6 +53,7 @@ os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
 import shutil
 import site
+import socket
 import struct
 import subprocess
 import sys
@@ -595,13 +596,20 @@ def _resolve_lora_adapter(out_dir: Path) -> Path:
     raise RuntimeError(f"no adapter found in {out_dir}")
 
 
+def _free_tcp_port() -> int:
+    """Return a currently free localhost TCP port for torchrun rendezvous."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def run_lora_training(base_model: str, train_p: Path, val_p: Path,
                       out_dir: Path, n_gpus: int, args: argparse.Namespace,
                       bundle: Path) -> Path:
     """Spawn torchrun on the existing training_bundle script."""
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "torchrun", f"--nproc_per_node={n_gpus}",
+        "torchrun", f"--nproc_per_node={n_gpus}", f"--master_port={_free_tcp_port()}",
         str(bundle / "train_lora_token_ids.py"),
         "--base-model", base_model,
         "--train-data", str(train_p),
@@ -615,6 +623,7 @@ def run_lora_training(base_model: str, train_p: Path, val_p: Path,
         "--warmup-ratio", str(getattr(args, "warmup_ratio", 0.03)),
         "--lora-r", str(args.lora_r),
         "--lora-alpha", str(args.lora_alpha),
+        "--lora-init", str(getattr(args, "lora_init", True)),
         "--lora-dropout", "0.05",
         "--eval-steps", str(getattr(args, "eval_steps", 50)),
         "--save-steps", str(getattr(args, "save_steps", getattr(args, "eval_steps", 50))),
@@ -627,18 +636,24 @@ def run_lora_training(base_model: str, train_p: Path, val_p: Path,
         cmd.append("--use-dora")
     if getattr(args, "use_rslora", False):
         cmd.append("--use-rslora")
+    if getattr(args, "use_loraplus", False):
+        cmd.extend(["--use-loraplus", "--loraplus-lr-ratio", str(getattr(args, "loraplus_lr_ratio", 16.0))])
     log.info("training: %s", " ".join(cmd))
     t0 = time.time()
     try:
         subprocess.check_call(cmd)
         log.info("training done in %.1fs", time.time() - t0)
-    except subprocess.CalledProcessError:
-        adapter = _resolve_lora_adapter(out_dir)
-        log.warning(
-            "training command failed, but found adapter checkpoint to continue: %s",
-            adapter,
-        )
-        return adapter
+    except subprocess.CalledProcessError as exc:
+        try:
+            adapter = _resolve_lora_adapter(out_dir)
+        except RuntimeError:
+            raise exc
+        else:
+            log.warning(
+                "training command failed, but found adapter checkpoint to continue: %s",
+                adapter,
+            )
+            return adapter
     return _resolve_lora_adapter(out_dir)
 
 

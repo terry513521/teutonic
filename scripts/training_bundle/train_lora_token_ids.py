@@ -18,6 +18,7 @@ from transformers import (
     TrainingArguments,
 )
 from peft import LoraConfig, get_peft_model
+from peft.optimizers import create_loraplus_optimizer
 
 
 def preload_cuda_runtime() -> None:
@@ -134,6 +135,8 @@ def main():
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
+    ap.add_argument("--lora-init", default="true",
+                    help="LoRA init_lora_weights value: true, false, pissa, pissa_niter_16, etc.")
     ap.add_argument("--lora-dropout", type=float, default=0.05)
     ap.add_argument("--lora-target-modules", type=str, default=None,
                     help="comma-separated module name suffixes; defaults to a Quasar-aware set")
@@ -141,6 +144,10 @@ def main():
                     help="Enable DoRA magnitude decomposition")
     ap.add_argument("--use-rslora", action="store_true",
                     help="Enable rank-stabilized LoRA scaling")
+    ap.add_argument("--use-loraplus", action="store_true",
+                    help="Use the LoRA+ optimizer for adapter training")
+    ap.add_argument("--loraplus-lr-ratio", type=float, default=16.0,
+                    help="LoRA+ learning-rate ratio between LoRA B and A")
     ap.add_argument("--eval-steps", type=int, default=50,
                     help="Run validation every N optimizer steps")
     ap.add_argument("--save-steps", type=int, default=50,
@@ -173,10 +180,18 @@ def main():
         "gate", "up", "down",
         "w_down_proj", "w_up_proj",
     ]
+    lora_init = args.lora_init
+    if isinstance(lora_init, str):
+        lowered = lora_init.lower()
+        if lowered in {"1", "true", "yes"}:
+            lora_init = True
+        elif lowered in {"0", "false", "no"}:
+            lora_init = False
     lora_cfg = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
+        init_lora_weights=lora_init,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=target_modules,
@@ -188,6 +203,16 @@ def main():
 
     train_ds = TokenIdsDataset(args.train_data, args.seq_len)
     val_ds = TokenIdsDataset(args.val_data, args.seq_len)
+
+    optimizer = None
+    if args.use_loraplus:
+        optimizer = create_loraplus_optimizer(
+            model,
+            optimizer_cls=torch.optim.AdamW,
+            lr=args.learning_rate,
+            loraplus_lr_ratio=args.loraplus_lr_ratio,
+            weight_decay=args.weight_decay,
+        )
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
@@ -220,6 +245,7 @@ def main():
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=Collator(),
+        optimizers=(optimizer, None),
     )
 
     trainer.train()

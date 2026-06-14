@@ -31,12 +31,18 @@ def main() -> None:
     ap.add_argument("--warmup-ratio", type=float, default=0.03)
     ap.add_argument("--lora-r", type=int, default=32)
     ap.add_argument("--lora-alpha", type=int, default=64)
+    ap.add_argument("--lora-init", default=True,
+                    help="LoRA init_lora_weights value, e.g. true, false, pissa, pissa_niter_16")
     ap.add_argument("--lora-target-modules", default="",
                     help="Comma-separated LoRA target module suffixes; empty uses training bundle defaults")
     ap.add_argument("--use-dora", action="store_true",
                     help="Enable DoRA magnitude decomposition in PEFT LoRA")
     ap.add_argument("--use-rslora", action="store_true",
                     help="Enable rank-stabilized LoRA scaling in PEFT")
+    ap.add_argument("--use-loraplus", action="store_true",
+                    help="Use the LoRA+ optimizer for adapter training")
+    ap.add_argument("--loraplus-lr-ratio", type=float, default=16.0,
+                    help="LoRA+ learning-rate ratio between LoRA B and A")
     ap.add_argument("--eval-steps", type=int, default=150,
                     help="Run validation every N optimizer steps")
     ap.add_argument("--save-steps", type=int, default=150,
@@ -74,9 +80,12 @@ def main() -> None:
         "warmup_ratio": args.warmup_ratio,
         "lora_r": args.lora_r,
         "lora_alpha": args.lora_alpha,
+        "lora_init": args.lora_init,
         "lora_target_modules": args.lora_target_modules,
         "use_dora": args.use_dora,
         "use_rslora": args.use_rslora,
+        "use_loraplus": args.use_loraplus,
+        "loraplus_lr_ratio": args.loraplus_lr_ratio,
         "eval_steps": args.eval_steps,
         "save_steps": args.save_steps,
     })

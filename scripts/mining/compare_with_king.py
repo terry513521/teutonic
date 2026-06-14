@@ -35,9 +35,71 @@ def resolve_king_dir(work: Path, king_dir_arg: str) -> tuple[Path, dict]:
     return Path(meta.get("king_dir", work / "king")), meta
 
 
-def refresh_current_king(king_dir: Path, metadata_out: Path, download_workers: int) -> dict:
+def _king_identity(king: dict) -> tuple[str, str]:
+    repo = king.get("model_repo") or king.get("hf_repo") or ""
+    revision = king.get("king_digest") or king.get("king_revision") or king.get("revision") or ""
+    return repo, revision
+
+
+def _metadata_matches_king(meta: dict, repo: str, revision: str) -> bool:
+    dashboard_king = meta.get("dashboard_king") or {}
+    meta_repo = meta.get("king_repo") or dashboard_king.get("model_repo") or dashboard_king.get("hf_repo")
+    meta_revision = (
+        meta.get("king_revision")
+        or dashboard_king.get("king_digest")
+        or dashboard_king.get("king_revision")
+        or dashboard_king.get("revision")
+    )
+    if repo and meta_repo != repo:
+        return False
+    if revision and meta_revision != revision:
+        return False
+    return bool(meta_repo)
+
+
+def _local_current_king_candidates(king_dir: Path, metadata_out: Path) -> list[tuple[Path, Path]]:
+    work = metadata_out.parent
+    candidates = [
+        (metadata_out, king_dir),
+        (work / "king.json", work / "king"),
+    ]
+    seen = set()
+    unique = []
+    for meta_path, default_dir in candidates:
+        key = (meta_path, default_dir)
+        if key not in seen:
+            unique.append((meta_path, default_dir))
+            seen.add(key)
+    return unique
+
+
+def refresh_current_king(king_dir: Path, metadata_out: Path, download_workers: int) -> tuple[Path, dict]:
     """Fetch the live dashboard king and materialize it for comparison."""
     king = fetch_king()
+    repo, revision = _king_identity(king)
+
+    for meta_path, default_dir in _local_current_king_candidates(king_dir, metadata_out):
+        if not meta_path.exists():
+            continue
+        meta = read_json(meta_path)
+        candidate_dir = Path(meta.get("king_dir", default_dir))
+        if _metadata_matches_king(meta, repo, revision) and has_model_files(candidate_dir):
+            log.info(
+                "reusing downloaded current king: repo=%s revision=%s dir=%s",
+                repo,
+                (revision or "HEAD")[:19],
+                candidate_dir,
+            )
+            meta.update({
+                "king_repo": repo,
+                "king_revision": revision,
+                "king_hash": meta.get("king_hash") or sha256_dir(candidate_dir),
+                "king_dir": str(candidate_dir),
+                "dashboard_king": king,
+            })
+            write_json(metadata_out, meta)
+            return candidate_dir, meta
+
     repo, revision = download_king_from_hippius(king, king_dir, download_workers)
     meta = {
         "king_repo": repo,
@@ -47,7 +109,7 @@ def refresh_current_king(king_dir: Path, metadata_out: Path, download_workers: i
         "dashboard_king": king,
     }
     write_json(metadata_out, meta)
-    return meta
+    return king_dir, meta
 
 
 def main() -> None:
@@ -97,7 +159,7 @@ def main() -> None:
         king_metadata_out = (
             Path(args.king_metadata_out) if args.king_metadata_out else work / "current_king.json"
         )
-        king_meta = refresh_current_king(king_dir, king_metadata_out, args.download_workers)
+        king_dir, king_meta = refresh_current_king(king_dir, king_metadata_out, args.download_workers)
     else:
         king_dir, king_meta = resolve_king_dir(work, args.king_dir)
     challenger_dir = Path(args.challenger_dir)
