@@ -482,6 +482,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=None,
                     help="Random seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--per-device-batch-size", type=int, default=8,
+                    help="Sequences scored per GPU per forward pass")
     ap.add_argument("--model-url", default=DEFAULT_KING_URL,
                     help="Hugging Face model URL or repo to download if king is incomplete")
     ap.add_argument("--repo", default="",
@@ -565,6 +567,7 @@ def main() -> None:
         args.device,
         scored_out,
         shard_records=shard_records,
+        per_device_batch_size=args.per_device_batch_size,
     )
     summary.update({
         "king_dir": str(king_dir),
@@ -575,6 +578,7 @@ def main() -> None:
         "dataset_cache": str(dataset_cache_root or (work / "cache" / "datasets")),
         "sample_counts": sample_counts,
         "n_score_requested": n_score,
+        "per_device_batch_size": args.per_device_batch_size,
         "train_shards": shard_records,
         "seed": args.seed,
     })

@@ -35,6 +35,7 @@ SHARD_START="${SHARD_START:-0}"
 RANDOM_SHARDS="${RANDOM_SHARDS:-1}"
 CACHE_ONLY="${CACHE_ONLY:-0}"
 DATASET_CACHE="${DATASET_CACHE:-/workspace/teutonic-mining/cache/datasets}"
+STEP2_PER_DEVICE_BATCH_SIZE="${STEP2_PER_DEVICE_BATCH_SIZE:-8}"
 N_SHARDS_PER_DATASET="${N_SHARDS_PER_DATASET:-10}"
 N_SHARDS="${N_SHARDS:-2}"
 EVAL_SHARD="${EVAL_SHARD:-10}"
@@ -257,6 +258,7 @@ step2_weighted() {
     --device "${STEP2_DEVICE}"
     --download-workers "${DOWNLOAD_WORKERS}"
     --dataset-cache "${DATASET_CACHE}"
+    --per-device-batch-size "${STEP2_PER_DEVICE_BATCH_SIZE}"
   )
   append_step2_shard_selection_arg cmd
   if [[ "${CACHE_ONLY}" == "1" || "${CACHE_ONLY}" == "true" ]]; then

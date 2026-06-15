@@ -172,9 +172,12 @@ def score_samples(
     device: str,
     out_path: Path,
     shard_records: list[dict] | None = None,
+    per_device_batch_size: int = 8,
 ) -> dict:
     if shard_records is not None and len(shard_records) != len(shards):
         raise ValueError("shard_records length must match shards length")
+    if per_device_batch_size <= 0:
+        raise ValueError("per_device_batch_size must be positive")
 
     rng = np.random.default_rng(seed)
     cands = []
@@ -274,71 +277,101 @@ def score_samples(
                     len(cands), expected_count, vocab_size)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    losses = []
-    per_device_batch_size = 8
-    batch_size = per_device_batch_size * len(scorers)
+    losses_by_order: list[float | None] = [None] * len(cands)
 
-    def score_token_batch(toks: list[list[int]]) -> list[float]:
-        if len(scorers) == 1:
-            model, scorer_device = scorers[0]
-            return compute_per_seq_loss(model, toks, scorer_device)
+    for scorer_idx, (model, scorer_device) in enumerate(scorers):
+        warmup_indices = list(range(scorer_idx, len(cands), len(scorers)))[:per_device_batch_size]
+        if not warmup_indices:
+            continue
+        warmup_toks = [
+            shards[cands[order_idx][0]][cands[order_idx][1]].tolist()
+            for order_idx in warmup_indices
+        ]
+        log.info("warming scorer replica on %s with %d samples", scorer_device, len(warmup_toks))
+        compute_per_seq_loss(model, warmup_toks, scorer_device)
 
-        parts = []
-        for scorer_idx, scorer in enumerate(scorers):
-            start = scorer_idx * per_device_batch_size
-            part = toks[start:start + per_device_batch_size]
-            if part:
-                parts.append((start, scorer, part))
-        out: list[float | None] = [None] * len(toks)
-        with ThreadPoolExecutor(max_workers=len(parts)) as pool:
-            futures = [
-                pool.submit(compute_per_seq_loss, model, part, scorer_device)
-                for _start, (model, scorer_device), part in parts
+    def score_partition(scorer_idx: int, scorer: tuple) -> list[tuple[int, float]]:
+        model, scorer_device = scorer
+        assigned = list(range(scorer_idx, len(cands), len(scorers)))
+        results: list[tuple[int, float]] = []
+        t0 = time.time()
+        for start in range(0, len(assigned), per_device_batch_size):
+            order_indices = assigned[start:start + per_device_batch_size]
+            toks = [
+                shards[cands[order_idx][0]][cands[order_idx][1]].tolist()
+                for order_idx in order_indices
             ]
-            for (start, _scorer, part), future in zip(parts, futures):
-                values = future.result()
-                out[start:start + len(part)] = values
-        return [float(value) for value in out if value is not None]
+            batch_losses = compute_per_seq_loss(model, toks, scorer_device)
+            results.extend(
+                (order_idx, float(loss))
+                for order_idx, loss in zip(order_indices, batch_losses)
+            )
+            done = min(start + per_device_batch_size, len(assigned))
+            if start == 0 or done == len(assigned) or (start // per_device_batch_size) % 20 == 0:
+                log.info(
+                    "gpu=%s scored %d/%d assigned samples | total=%d | %.1fs",
+                    scorer_device,
+                    done,
+                    len(assigned),
+                    len(cands),
+                    time.time() - t0,
+                )
+        return results
 
+    if len(scorers) == 1:
+        for order_idx, loss in score_partition(0, scorers[0]):
+            losses_by_order[order_idx] = loss
+    else:
+        with ThreadPoolExecutor(max_workers=len(scorers)) as pool:
+            futures = [
+                pool.submit(score_partition, scorer_idx, scorer)
+                for scorer_idx, scorer in enumerate(scorers)
+            ]
+            for future in futures:
+                for order_idx, loss in future.result():
+                    losses_by_order[order_idx] = loss
+
+    missing = sum(loss is None for loss in losses_by_order)
+    if missing:
+        raise RuntimeError(f"internal scoring error: {missing} samples were not scored")
+
+    losses = []
     with out_path.open("w") as f:
-        for i in range(0, len(cands), batch_size):
-            chunk = cands[i:i + batch_size]
-            toks = [shards[s][j].tolist() for s, j in chunk]
-            batch_losses = score_token_batch(toks)
-            for (s_idx, j), tok, loss in zip(chunk, toks, batch_losses):
-                arr = np.asarray(tok)
-                unique_r = float(len(set(tok)) / len(tok))
-                rep_r = float(np.mean(arr[1:] == arr[:-1])) if len(arr) > 1 else 0.0
-                ngrams = [tuple(tok[k:k + 4]) for k in range(len(tok) - 3)]
-                rep_ng = 1.0 - len(set(ngrams)) / len(ngrams) if ngrams else 0.0
-                shard_meta = shard_records[s_idx] if shard_records else {}
-                losses.append(float(loss))
-                row = {
-                    "shard": s_idx,
-                    "idx": j,
-                    "loss": float(loss),
-                    "unique_r": unique_r,
-                    "rep_r": rep_r,
-                    "rep_ng4": rep_ng,
-                    "tokens": tok,
-                }
-                for key in (
-                    "dataset",
-                    "dataset_weight",
-                    "target_samples",
-                    "target_samples_per_shard",
-                    "manifest_url",
-                    "manifest_tokenizer",
-                    "shard_idx",
-                    "shard_key",
-                    "path",
-                    "source_file",
-                ):
-                    if key in shard_meta:
-                        row[key] = shard_meta[key]
-                f.write(json.dumps(row) + "\n")
-            if (i // batch_size) % 20 == 0:
-                log.info("scored %d/%d samples", min(i + batch_size, len(cands)), len(cands))
+        for order_idx, ((s_idx, j), loss) in enumerate(zip(cands, losses_by_order)):
+            tok = shards[s_idx][j].tolist()
+            arr = np.asarray(tok)
+            unique_r = float(len(set(tok)) / len(tok))
+            rep_r = float(np.mean(arr[1:] == arr[:-1])) if len(arr) > 1 else 0.0
+            ngrams = [tuple(tok[k:k + 4]) for k in range(len(tok) - 3)]
+            rep_ng = 1.0 - len(set(ngrams)) / len(ngrams) if ngrams else 0.0
+            shard_meta = shard_records[s_idx] if shard_records else {}
+            losses.append(float(loss))
+            row = {
+                "shard": s_idx,
+                "idx": j,
+                "loss": float(loss),
+                "unique_r": unique_r,
+                "rep_r": rep_r,
+                "rep_ng4": rep_ng,
+                "tokens": tok,
+            }
+            for key in (
+                "dataset",
+                "dataset_weight",
+                "target_samples",
+                "target_samples_per_shard",
+                "manifest_url",
+                "manifest_tokenizer",
+                "shard_idx",
+                "shard_key",
+                "path",
+                "source_file",
+            ):
+                if key in shard_meta:
+                    row[key] = shard_meta[key]
+            f.write(json.dumps(row) + "\n")
+            if order_idx == 0 or (order_idx + 1) % (per_device_batch_size * len(scorers) * 20) == 0:
+                log.info("wrote %d/%d scored samples", order_idx + 1, len(cands))
 
     for model, _scorer_device in scorers:
         del model
