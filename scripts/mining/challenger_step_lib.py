@@ -50,12 +50,25 @@ def write_json(path: str | Path, data: dict) -> None:
     tmp.replace(out)
 
 
+def default_scoring_devices() -> str:
+    """All visible CUDA devices, or cpu when CUDA is unavailable."""
+    if not torch.cuda.is_available():
+        return "cpu"
+    device_count = torch.cuda.device_count()
+    if device_count <= 0:
+        return "cpu"
+    return ",".join(f"cuda:{idx}" for idx in range(device_count))
+
+
 def parse_scoring_devices(device: str) -> list[str]:
     """Parse `--device` for sample scoring.
 
     Accepts existing single-device forms (`2`, `cuda:2`, `cpu`) plus comma
-    separated CUDA devices such as `2,3` or `cuda:2,cuda:3`.
+    separated CUDA devices such as `2,3` or `cuda:2,cuda:3`. Use `auto` to
+    score on every visible CUDA device.
     """
+    if str(device or "").strip().lower() in {"auto", "all"}:
+        device = default_scoring_devices()
     raw_parts = [part.strip() for part in str(device or "").split(",") if part.strip()]
     if not raw_parts:
         raise ValueError("device cannot be empty")

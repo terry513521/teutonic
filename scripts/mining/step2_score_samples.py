@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
-from challenger_step_lib import read_json, score_samples, write_json
+from challenger_step_lib import default_scoring_devices, read_json, score_samples, write_json
 from train_challenger import (
     DEFAULT_DATASETS,
     download_shard,
@@ -34,31 +34,33 @@ MODEL_ALLOW_PATTERNS = [
     "*.model",
     "*.txt",
 ]
-DEFAULT_TARGET_SAMPLES_PER_DATASET = 50000
-DEFAULT_SHARDS_PER_DATASET = 20
-DEFAULT_SAMPLES_PER_SHARD = 2500
+
+NUM = 200000
+SHARD_NUM = 20
+
 DEFAULT_DATASET_PLAN = {
     "automathtext-v2": {
-        "n_shards": DEFAULT_SHARDS_PER_DATASET,
-        "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
-        "samples_per_shard": DEFAULT_SAMPLES_PER_SHARD,
+        "n_shards": SHARD_NUM,
+        "target_samples": NUM * 0.35,
+        "samples_per_shard": NUM * 0.35 / SHARD_NUM,
     },
     "quasar-sn3": {
         "n_shards": 1,
-        "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
+        "target_samples": NUM * 0.05,
     },
     "ultradata-math": {
-        "n_shards": DEFAULT_SHARDS_PER_DATASET,
-        "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
-        "samples_per_shard": DEFAULT_SAMPLES_PER_SHARD,
+        "n_shards": SHARD_NUM,
+        "target_samples": NUM * 0.35,
+        "samples_per_shard": NUM * 0.35 / SHARD_NUM,
     },
     "finewebedu": {
-        "n_shards": DEFAULT_SHARDS_PER_DATASET,
-        "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
-        "samples_per_shard": DEFAULT_SAMPLES_PER_SHARD,
+        "n_shards": 10,
+        "target_samples": NUM*0.25,
+        "samples_per_shard": 5000,
     },
 }
 DEFAULT_MIN_FREE_GB = 5.0
+DEFAULT_SHARDS_PER_DATASET = SHARD_NUM
 
 
 def repo_from_hf_link(model: str) -> str:
@@ -481,7 +483,11 @@ def main() -> None:
                     help="Total sequences to score when dataset specs do not set samples_per_shard")
     ap.add_argument("--seed", type=int, default=None,
                     help="Random seed; omitted means choose a new seed greater than 100")
-    ap.add_argument("--device", default="cuda:0")
+    ap.add_argument(
+        "--device",
+        default=default_scoring_devices(),
+        help="CUDA device(s) for scoring: cuda:0, 0,1,2,3, or auto/all (default: all visible GPUs)",
+    )
     ap.add_argument("--per-device-batch-size", type=int, default=8,
                     help="Sequences scored per GPU per forward pass")
     ap.add_argument("--model-url", default=DEFAULT_KING_URL,

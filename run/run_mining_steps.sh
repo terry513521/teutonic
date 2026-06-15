@@ -26,7 +26,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 KING_SOURCE="${KING_SOURCE:-dashboard}" # dashboard | hippius | hf
 STEP2_IMPL="${STEP2_IMPL:-weighted}"     # weighted | legacy
 DEVICE="${DEVICE:-cuda:0}"
-STEP2_DEVICE="${STEP2_DEVICE:-cuda:0,cuda:1}"
+STEP2_DEVICE="${STEP2_DEVICE:-auto}"
 SEED="${SEED:-$(random_seed_gt_100)}"
 STEP4_SEED="${STEP4_SEED:-${SEED}}"
 

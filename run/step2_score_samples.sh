@@ -20,7 +20,8 @@ CACHE_ONLY="${CACHE_ONLY:-0}"
 DATASET_CACHE="${DATASET_CACHE:-/workspace/teutonic-mining/cache/datasets}"
 STEP2_PER_DEVICE_BATCH_SIZE="${STEP2_PER_DEVICE_BATCH_SIZE:-8}"
 # Comma-separated CUDA devices are supported, e.g. DEVICE=0,1.
-DEVICE="${USER_DEVICE:-cuda:0,cuda:1}"
+# Default `auto` scores on every visible CUDA GPU.
+DEVICE="${USER_DEVICE:-auto}"
 
 cmd=(
   "${PYTHON_BIN}" scripts/mining/step2_score_samples.py
