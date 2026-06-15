@@ -79,7 +79,7 @@ already cached local shards.
 For reproducible shard/sample selection:
 
 ```bash
-SEED=42 run/step2_score_samples.sh
+SEED=123 run/step2_score_samples.sh
 ```
 
 Step 3 defaults to `TRAIN_PER_ITER=15000` and `VAL_SIZE=600`, using a harder

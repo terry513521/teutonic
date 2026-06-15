@@ -34,9 +34,9 @@ MODEL_ALLOW_PATTERNS = [
     "*.model",
     "*.txt",
 ]
-DEFAULT_TARGET_SAMPLES_PER_DATASET = 30_000
-DEFAULT_SHARDS_PER_DATASET = 10
-DEFAULT_SAMPLES_PER_SHARD = 3_000
+DEFAULT_TARGET_SAMPLES_PER_DATASET = 50000
+DEFAULT_SHARDS_PER_DATASET = 20
+DEFAULT_SAMPLES_PER_SHARD = 2500
 DEFAULT_DATASET_PLAN = {
     "automathtext-v2": {
         "n_shards": DEFAULT_SHARDS_PER_DATASET,
@@ -44,7 +44,7 @@ DEFAULT_DATASET_PLAN = {
         "samples_per_shard": DEFAULT_SAMPLES_PER_SHARD,
     },
     "quasar-sn3": {
-        "n_shards": 5,
+        "n_shards": 1,
         "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
     },
     "ultradata-math": {
@@ -343,6 +343,7 @@ def load_weighted_dataset_shards(
     random_shards: bool,
     shard_start: int,
     cache_only: bool,
+    dataset_cache_root: Path | None = None,
 ) -> tuple[list, list[dict]]:
     shards = []
     shard_records = []
@@ -355,7 +356,7 @@ def load_weighted_dataset_shards(
         target_samples = int(sample_counts[name])
         samples_per_shard = int(spec.get("samples_per_shard", 0) or 0)
         requested_n_shards = int(spec.get("n_shards", n_shards_per_dataset))
-        dataset_cache = work / "cache" / "datasets" / name
+        dataset_cache = (dataset_cache_root or (work / "cache" / "datasets")) / name
         manifest = fetch_manifest_url(dataset_cache, manifest_url)
         selected_records: list[tuple[int, dict, Path]]
         if cache_only:
@@ -479,7 +480,7 @@ def main() -> None:
     ap.add_argument("--n-score", type=int, default=20000,
                     help="Total sequences to score when dataset specs do not set samples_per_shard")
     ap.add_argument("--seed", type=int, default=None,
-                    help="Random seed; omitted means choose a new seed each run")
+                    help="Random seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--model-url", default=DEFAULT_KING_URL,
                     help="Hugging Face model URL or repo to download if king is incomplete")
@@ -492,7 +493,9 @@ def main() -> None:
     ap.add_argument("--download-workers", type=int, default=16,
                     help="Parallel workers if step2 must download a missing/incomplete king")
     ap.add_argument("--cache-only", action="store_true",
-                    help="Select dataset shards only from <work>/cache/datasets and never download missing shards")
+                    help="Select dataset shards only from the dataset cache and never download missing shards")
+    ap.add_argument("--dataset-cache", default="",
+                    help="Dataset cache root; defaults to <work>/cache/datasets")
     ap.add_argument("--scored-out", default="",
                     help="Output scored JSONL; defaults to <work>/scored_samples.jsonl")
     ap.add_argument("--summary-out", default="",
@@ -501,11 +504,12 @@ def main() -> None:
                     help="Require this much free disk before scoring (0 disables check)")
     args = ap.parse_args()
     if args.seed is None:
-        args.seed = random.SystemRandom().randint(0, 2**32 - 1)
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
         log.info("no --seed provided; generated step2 seed=%d", args.seed)
 
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
+    dataset_cache_root = Path(args.dataset_cache) if args.dataset_cache else None
     scored_out = Path(args.scored_out) if args.scored_out else work / "scored_samples.jsonl"
     summary_out = Path(args.summary_out) if args.summary_out else work / "score_summary.json"
     require_free_space(scored_out.parent, args.min_free_gb)
@@ -550,6 +554,7 @@ def main() -> None:
         args.random_shards,
         args.shard_start,
         args.cache_only,
+        dataset_cache_root,
     )
 
     summary = score_samples(
@@ -567,6 +572,7 @@ def main() -> None:
         "king_revision": king_meta.get("king_revision"),
         "king_hash": king_meta.get("king_hash"),
         "datasets_config": datasets,
+        "dataset_cache": str(dataset_cache_root or (work / "cache" / "datasets")),
         "sample_counts": sample_counts,
         "n_score_requested": n_score,
         "train_shards": shard_records,

@@ -48,6 +48,7 @@ import json
 import logging
 import math
 import os
+import random
 
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
@@ -199,15 +200,12 @@ def load_shard(path: Path, seq_len: int = SEQ_LEN) -> tuple[np.ndarray, int]:
     data_offset, header = parse_npy_header(raw)
     shape = header["shape"]
     flat = np.frombuffer(raw[data_offset:], dtype="<u4")
-    if len(shape) == 1:
-        n_total = shape[0]
-        n_seq = n_total // seq_len
-        arr = flat[: n_seq * seq_len].reshape(n_seq, seq_len)
-    elif len(shape) == 2:
-        n_seq, seq_len = shape
-        arr = flat.reshape(n_seq, seq_len)
-    else:
+    if len(shape) not in (1, 2):
         raise ValueError(f"unexpected shard shape {shape}")
+    n_seq = flat.size // seq_len
+    if n_seq <= 0:
+        raise ValueError(f"shard {path} has too few tokens for seq_len={seq_len}")
+    arr = flat[: n_seq * seq_len].reshape(n_seq, seq_len)
     return arr, seq_len
 
 
@@ -608,6 +606,9 @@ def run_lora_training(base_model: str, train_p: Path, val_p: Path,
                       bundle: Path) -> Path:
     """Spawn torchrun on the existing training_bundle script."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    train_seed = getattr(args, "seed", None)
+    if train_seed is None:
+        train_seed = random.SystemRandom().randint(101, 2**32 - 1)
     cmd = [
         "torchrun", f"--nproc_per_node={n_gpus}", f"--master_port={_free_tcp_port()}",
         str(bundle / "train_lora_token_ids.py"),
@@ -653,6 +654,7 @@ def run_lora_training(base_model: str, train_p: Path, val_p: Path,
         "--eval-steps", str(getattr(args, "eval_steps", 50)),
         "--save-steps", str(getattr(args, "save_steps", getattr(args, "eval_steps", 50))),
         "--save-total-limit", str(getattr(args, "save_total_limit", 0)),
+        "--seed", str(train_seed),
     ]
     lora_target_modules = getattr(args, "lora_target_modules", "")
     if lora_target_modules:
@@ -771,7 +773,8 @@ def main():
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--n-gpus", type=int, default=8)
     ap.add_argument("--upload-repo", default="",
                     help="If set + accepted, push merged model to this HF repo. "
@@ -783,6 +786,9 @@ def main():
     ap.add_argument("--report-out", default="",
                     help="Write a final JSON verdict to this path")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        log.info("no --seed provided; generated training seed=%d", args.seed)
 
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import random
 from pathlib import Path
 
 from challenger_step_lib import build_curriculum
@@ -21,8 +22,12 @@ def main() -> None:
                     help="Training sequences to keep after bucketing")
     ap.add_argument("--val-size", type=int, default=600,
                     help="Validation sequences to keep after bucketing")
-    ap.add_argument("--seed", type=int, default=2026)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        log.info("no --seed provided; generated step3 seed=%d", args.seed)
 
     work = Path(args.work)
     scored = Path(args.scored) if args.scored else work / "scored_samples.jsonl"

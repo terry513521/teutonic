@@ -3,6 +3,7 @@ import argparse
 import io
 import json
 import math
+import random
 import struct
 from pathlib import Path
 
@@ -94,8 +95,12 @@ def main():
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--max-samples", type=int, default=5000)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        print(f"no --seed provided; generated score seed={args.seed}", flush=True)
 
     shard, seq_len = load_shard(args.shard)
     rng = np.random.default_rng(args.seed)

@@ -2,32 +2,28 @@
   {
     "name": "automathtext-v2",
     "manifest_url": "https://eu-central-1.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
-    "weight": 0.3854166667,
-    "n_shards": 10,
-    "target_samples": 30000,
-    "samples_per_shard": 3000
+    "n_shards": 20,
+    "target_samples": 2500,
+    "samples_per_shard": 5000
   },
   {
     "name": "quasar-sn3",
     "manifest_url": "https://us-east-1.hippius.com/teutonic-sn3/dataset/quasar-sn3-retok/manifest.json",
-    "weight": 0.3333333333,
     "n_shards": 1,
-    "target_samples": 30000
+    "target_samples": 50000
   },
   {
     "name": "ultradata-math",
     "manifest_url": "https://us-east-1.hippius.com/teutonic-sn3/dataset/ultradata-math-quasar-10b/manifest.json",
-    "weight": 0.125,
-    "n_shards": 10,
-    "target_samples": 30000,
-    "samples_per_shard": 3000
+    "n_shards": 20,
+    "target_samples": 2500,
+    "samples_per_shard": 5000
   },
   {
     "name": "finewebedu",
     "manifest_url": "https://eu-central-1.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
-    "weight": 0.15625,
     "n_shards": 10,
-    "target_samples": 30000,
-    "samples_per_shard": 3000
+    "target_samples": 5000,
+    "samples_per_shard": 5000
   }
 ]

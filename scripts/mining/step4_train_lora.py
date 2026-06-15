@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import random
 from pathlib import Path
 
 from challenger_step_lib import read_json, write_json
@@ -104,9 +105,14 @@ def main() -> None:
                     help="Save checkpoints every N optimizer steps")
     ap.add_argument("--save-total-limit", type=int, default=0,
                     help="Max checkpoints to retain (0 = keep all)")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Seed for training shuffling and adapter initialization; omitted chooses >100")
     ap.add_argument("--metadata-out", default="",
                     help="Adapter metadata JSON; defaults to <work>/adapter.json")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        log.info("no --seed provided; generated step4 seed=%d", args.seed)
 
     work = Path(args.work)
     if args.king_dir:
@@ -181,6 +187,7 @@ def main() -> None:
         "eval_steps": args.eval_steps,
         "save_steps": args.save_steps,
         "save_total_limit": args.save_total_limit,
+        "seed": args.seed,
     })
     log.info("step4 complete: adapter=%s metadata=%s", adapter, metadata_out)
 

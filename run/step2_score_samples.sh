@@ -7,15 +7,19 @@ set -euo pipefail
 # sampling.
 
 USER_SEED="${SEED:-}"
+USER_DEVICE="${DEVICE:-}"
 
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-N_SCORE="${N_SCORE:-120000}"
+N_SCORE="${N_SCORE:-10000}"
 SHARD_START="${SHARD_START:-0}"
 RANDOM_SHARDS="${RANDOM_SHARDS:-1}"
 MIN_FREE_GB="${MIN_FREE_GB:-5}"
 CACHE_ONLY="${CACHE_ONLY:-0}"
+DATASET_CACHE="${DATASET_CACHE:-/workspace/teutonic-mining/cache/datasets}"
+# Comma-separated CUDA devices are supported, e.g. DEVICE=0,1.
+DEVICE="${USER_DEVICE:-cuda:0,cuda:1}"
 
 cmd=(
   "${PYTHON_BIN}" scripts/mining/step2_score_samples.py
@@ -26,6 +30,7 @@ cmd=(
   --device "${DEVICE}"
   --download-workers "${DOWNLOAD_WORKERS}"
   --min-free-gb "${MIN_FREE_GB}"
+  --dataset-cache "${DATASET_CACHE}"
 )
 
 append_step2_shard_selection_arg cmd

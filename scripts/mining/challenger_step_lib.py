@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import collections
+from concurrent.futures import ThreadPoolExecutor
 import json
 import shutil
 import ctypes
@@ -47,6 +48,26 @@ def write_json(path: str | Path, data: dict) -> None:
     tmp = out.with_name(f".{out.name}.tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n")
     tmp.replace(out)
+
+
+def parse_scoring_devices(device: str) -> list[str]:
+    """Parse `--device` for sample scoring.
+
+    Accepts existing single-device forms (`2`, `cuda:2`, `cpu`) plus comma
+    separated CUDA devices such as `2,3` or `cuda:2,cuda:3`.
+    """
+    raw_parts = [part.strip() for part in str(device or "").split(",") if part.strip()]
+    if not raw_parts:
+        raise ValueError("device cannot be empty")
+    devices = []
+    for part in raw_parts:
+        if part.isdigit():
+            devices.append(f"cuda:{part}")
+        else:
+            devices.append(part)
+    if len(devices) > 1 and any(not dev.startswith("cuda") for dev in devices):
+        raise ValueError("multi-device scoring currently requires CUDA devices")
+    return devices
 
 
 def jsonl_rows(path: str | Path):
@@ -197,16 +218,24 @@ def score_samples(
                 cands.append((s_idx, int(j)))
     rng.shuffle(cands)
 
-    log.info("scoring %d samples with king on %s", len(cands), device)
+    devices = parse_scoring_devices(device)
+    log.info("scoring %d samples with king on %s", len(cands), ",".join(devices))
     preload_cuda_runtime()
     add_model_dir_to_pythonpath(king_dir)
     patch_transformers_masking_utils()
-    model = AutoModelForCausalLM.from_pretrained(
-        king_dir, torch_dtype=torch.bfloat16, device_map={"": device},
-        use_safetensors=True, trust_remote_code=True,
+    scorers = []
+    for scorer_device in devices:
+        log.info("loading king scorer replica on %s", scorer_device)
+        model = AutoModelForCausalLM.from_pretrained(
+            king_dir, torch_dtype=torch.bfloat16, device_map={"": scorer_device},
+            use_safetensors=True, trust_remote_code=True,
+        )
+        model.eval()
+        scorers.append((model, scorer_device))
+    vocab_size = min(
+        int(getattr(model.config, "vocab_size", None) or model.lm_head.out_features)
+        for model, _ in scorers
     )
-    model.eval()
-    vocab_size = getattr(model.config, "vocab_size", None) or model.lm_head.out_features
 
     valid_cands = []
     valid_by_dataset: dict[str, int] = collections.defaultdict(int)
@@ -246,12 +275,36 @@ def score_samples(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     losses = []
-    batch_size = 8
+    per_device_batch_size = 8
+    batch_size = per_device_batch_size * len(scorers)
+
+    def score_token_batch(toks: list[list[int]]) -> list[float]:
+        if len(scorers) == 1:
+            model, scorer_device = scorers[0]
+            return compute_per_seq_loss(model, toks, scorer_device)
+
+        parts = []
+        for scorer_idx, scorer in enumerate(scorers):
+            start = scorer_idx * per_device_batch_size
+            part = toks[start:start + per_device_batch_size]
+            if part:
+                parts.append((start, scorer, part))
+        out: list[float | None] = [None] * len(toks)
+        with ThreadPoolExecutor(max_workers=len(parts)) as pool:
+            futures = [
+                pool.submit(compute_per_seq_loss, model, part, scorer_device)
+                for _start, (model, scorer_device), part in parts
+            ]
+            for (start, _scorer, part), future in zip(parts, futures):
+                values = future.result()
+                out[start:start + len(part)] = values
+        return [float(value) for value in out if value is not None]
+
     with out_path.open("w") as f:
         for i in range(0, len(cands), batch_size):
             chunk = cands[i:i + batch_size]
             toks = [shards[s][j].tolist() for s, j in chunk]
-            batch_losses = compute_per_seq_loss(model, toks, device)
+            batch_losses = score_token_batch(toks)
             for (s_idx, j), tok, loss in zip(chunk, toks, batch_losses):
                 arr = np.asarray(tok)
                 unique_r = float(len(set(tok)) / len(tok))
@@ -287,8 +340,13 @@ def score_samples(
             if (i // batch_size) % 20 == 0:
                 log.info("scored %d/%d samples", min(i + batch_size, len(cands)), len(cands))
 
-    del model
-    torch.cuda.empty_cache()
+    for model, _scorer_device in scorers:
+        del model
+    scorers.clear()
+    for scorer_device in devices:
+        if scorer_device.startswith("cuda"):
+            with torch.cuda.device(scorer_device):
+                torch.cuda.empty_cache()
 
     by_dataset: dict[str, dict] = {}
     if shard_records:

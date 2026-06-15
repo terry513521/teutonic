@@ -24,11 +24,11 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import random
 
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
 import shutil
-import time
 from pathlib import Path
 
 import numpy as np  # noqa: F401  (parity with miner.py imports for any future seed plumbing)
@@ -54,13 +54,17 @@ def main():
                     help="HF repo to push the perturbed challenger to")
     ap.add_argument("--noise", type=float, default=1e-4,
                     help="Gaussian noise stdev (matches miner.py default scale)")
-    ap.add_argument("--seed", type=int, default=int(time.time()))
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--workdir", default="/workspace/sandbox-mock",
                     help="local scratch dir")
     ap.add_argument("--private", action="store_true",
                     help="create the upload repo private (default: public)")
     ap.add_argument("--hf-token", default=os.environ.get("HF_TOKEN", ""))
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        log.info("no --seed provided; generated perturb seed=%d", args.seed)
 
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+random_seed_gt_100() {
+  echo $((101 + RANDOM + (RANDOM << 15)))
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USER_SEED="${SEED:-}"
 if [[ -n "${TEUTONIC_ROOT:-}" ]]; then
@@ -22,12 +26,15 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 KING_SOURCE="${KING_SOURCE:-dashboard}" # dashboard | hippius | hf
 STEP2_IMPL="${STEP2_IMPL:-weighted}"     # weighted | legacy
 DEVICE="${DEVICE:-cuda:0}"
-SEED="${SEED:-42}"
+STEP2_DEVICE="${STEP2_DEVICE:-cuda:0,cuda:1}"
+SEED="${SEED:-$(random_seed_gt_100)}"
+STEP4_SEED="${STEP4_SEED:-${SEED}}"
 
 DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-8}"
 SHARD_START="${SHARD_START:-0}"
 RANDOM_SHARDS="${RANDOM_SHARDS:-1}"
 CACHE_ONLY="${CACHE_ONLY:-0}"
+DATASET_CACHE="${DATASET_CACHE:-/workspace/teutonic-mining/cache/datasets}"
 N_SHARDS_PER_DATASET="${N_SHARDS_PER_DATASET:-10}"
 N_SHARDS="${N_SHARDS:-2}"
 EVAL_SHARD="${EVAL_SHARD:-10}"
@@ -56,7 +63,7 @@ LORA_USE_QLORA="${LORA_USE_QLORA:-${USE_QLORA:-0}}"
 QLORA_QUANT_TYPE="${QLORA_QUANT_TYPE:-nf4}"
 LORA_USE_UNSLOTH="${LORA_USE_UNSLOTH:-${USE_UNSLOTH:-0}}"
 UNSLOTH_GRADIENT_CHECKPOINTING="${UNSLOTH_GRADIENT_CHECKPOINTING:-unsloth}"
-UNSLOTH_RANDOM_STATE="${UNSLOTH_RANDOM_STATE:-3407}"
+UNSLOTH_RANDOM_STATE="${UNSLOTH_RANDOM_STATE:-${STEP4_SEED}}"
 LORA_USE_DELTA_LORA="${LORA_USE_DELTA_LORA:-${USE_DELTA_LORA:-0}}"
 LORA_USE_PISSA="${LORA_USE_PISSA:-${USE_PISSA:-0}}"
 LORA_USE_CORDA="${LORA_USE_CORDA:-${USE_CORDA:-0}}"
@@ -123,7 +130,7 @@ Common environment variables:
   N_GPUS=1 MICRO_BATCH=4 GRAD_ACCUM=4 LR=1e-5 EPOCHS=2.0 WARMUP_RATIO=0.03 WEIGHT_DECAY=0.01 LORA_DROPOUT=0.05 EVAL_STEPS=150
   LORA_INIT=true LORA_USE_DORA=0 LORA_USE_RSLORA=0 LORA_USE_LORAPLUS=0 LORAPLUS_LR_RATIO=16
   LORA_ADAPTER_TYPE=lora LORA_USE_QLORA=0 LORA_USE_UNSLOTH=0 LORA_USE_PISSA=0 LORA_USE_LOFTQ=0 LORA_USE_EVA=0
-  DEVICE=cuda:0 SEED=42
+  DEVICE=cuda:0 SEED=123
 
 Examples:
   run/setup_finetune_env.sh
@@ -247,8 +254,9 @@ step2_weighted() {
     --n-shards-per-dataset "${N_SHARDS_PER_DATASET}"
     --shard-start "${SHARD_START}"
     --n-score "${N_SCORE}"
-    --device "${DEVICE}"
+    --device "${STEP2_DEVICE}"
     --download-workers "${DOWNLOAD_WORKERS}"
+    --dataset-cache "${DATASET_CACHE}"
   )
   append_step2_shard_selection_arg cmd
   if [[ "${CACHE_ONLY}" == "1" || "${CACHE_ONLY}" == "true" ]]; then
@@ -345,6 +353,7 @@ step4() {
     --eval-steps "${EVAL_STEPS}"
     --save-steps "${SAVE_STEPS}"
     --save-total-limit "${SAVE_TOTAL_LIMIT}"
+    --seed "${STEP4_SEED}"
   )
   if [[ -n "${LORA_TARGET_MODULES}" ]]; then
     cmd+=(--lora-target-modules "${LORA_TARGET_MODULES}")

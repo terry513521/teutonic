@@ -4,6 +4,7 @@ import ctypes
 import inspect
 import json
 import os
+import random
 import site
 import sys
 from dataclasses import dataclass
@@ -19,6 +20,13 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model
 from peft.optimizers import create_loraplus_optimizer
+
+
+def set_training_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _optional_peft_class(name: str):
@@ -431,8 +439,14 @@ def main():
                     help="Save checkpoints every N optimizer steps")
     ap.add_argument("--save-total-limit", type=int, default=0,
                     help="Max checkpoints to retain (0 = keep all)")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Seed for trainer shuffling and adapter initialization; omitted chooses >100")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        print(f"no --seed provided; generated training seed={args.seed}", flush=True)
 
+    set_training_seed(args.seed)
     preload_cuda_runtime()
     add_model_dir_to_pythonpath(args.base_model)
     patch_transformers_masking_utils()
@@ -508,6 +522,8 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
+        seed=args.seed,
+        data_seed=args.seed,
     )
 
     trainer = Trainer(

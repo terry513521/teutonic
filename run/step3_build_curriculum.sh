@@ -6,7 +6,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 TRAIN_PER_ITER="${TRAIN_PER_ITER:-110000}"
 VAL_SIZE="${VAL_SIZE:-2000}"
-SEED="${SEED:-2026}"
 
 cmd=(
   "${PYTHON_BIN}" scripts/mining/step3_build_curriculum.py

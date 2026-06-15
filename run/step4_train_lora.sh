@@ -4,6 +4,7 @@ set -euo pipefail
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
+STEP4_SEED="${STEP4_SEED:-${SEED}}"
 N_GPUS="${N_GPUS:-1}"
 MICRO_BATCH="${MICRO_BATCH:-2}"
 GRAD_ACCUM="${GRAD_ACCUM:-8}"
@@ -109,7 +110,8 @@ cmd=(
   --lokr-decompose-factor "${LOKR_DECOMPOSE_FACTOR}" \
   --eval-steps "${EVAL_STEPS}" \
   --save-steps "${SAVE_STEPS}" \
-  --save-total-limit "${SAVE_TOTAL_LIMIT}"
+  --save-total-limit "${SAVE_TOTAL_LIMIT}" \
+  --seed "${STEP4_SEED}"
 )
 
 if [[ -n "${LORA_TARGET_MODULES}" ]]; then

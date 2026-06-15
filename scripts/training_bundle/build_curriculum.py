@@ -30,8 +30,12 @@ def main():
     ap.add_argument("--general-frac", type=float, default=0.7)
     ap.add_argument("--hard-frac", type=float, default=0.2)
     ap.add_argument("--easy-frac", type=float, default=0.1)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        print(f"no --seed provided; generated curriculum seed={args.seed}", flush=True)
 
     rng = random.Random(args.seed)
     rows = list(read_jsonl(args.scores))

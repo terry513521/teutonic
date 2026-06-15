@@ -23,8 +23,12 @@ KING_DIR="${KING_DIR:-${WORK_DIR}/king}"
 LORA_OUT_DIR="${LORA_OUT_DIR:-${WORK_DIR}/lora_out}"
 MERGED_DIR="${MERGED_DIR:-${WORK_DIR}/merged}"
 
+random_seed_gt_100() {
+  echo $((101 + RANDOM + (RANDOM << 15)))
+}
+
 DEVICE="${DEVICE:-cuda:0}"
-SEED="${SEED:-42}"
+SEED="${SEED:-$(random_seed_gt_100)}"
 DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-8}"
 
 cd "${ROOT_DIR}"

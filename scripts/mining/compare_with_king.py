@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import random
 import time
 from pathlib import Path
 
@@ -144,13 +145,17 @@ def main() -> None:
                     help="Do not exclude shards used during step2 scoring")
     ap.add_argument("--n-eval", type=int, default=2000,
                     help="Total evaluation sequences across datasets")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--n-bootstrap", type=int, default=10000)
     ap.add_argument("--comparison-out", default="",
                     help="Comparison JSON; defaults to <work>/comparison.json")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        log.info("no --seed provided; generated compare seed=%d", args.seed)
 
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)

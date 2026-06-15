@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -41,11 +42,15 @@ def main():
     ap.add_argument("--vocab-size", type=int, default=151936)
     ap.add_argument("--key", default="dataset/lxxx-smoke/shard_smoke.npy",
                     help="S3 object key under TEUTONIC_DS_BUCKET")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--local-out", default="/tmp/lxxx-smoke-shard.npy")
     ap.add_argument("--no-upload", action="store_true",
                     help="skip S3 upload (just write local file)")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        print(f"no --seed provided; generated synthetic shard seed={args.seed}", flush=True)
 
     print(f"generating {args.tokens:,} tokens uniform in [0, {args.vocab_size})", flush=True)
     rng = np.random.default_rng(args.seed)

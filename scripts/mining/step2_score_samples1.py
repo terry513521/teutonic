@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
@@ -331,7 +332,8 @@ def main() -> None:
     ap.add_argument("--single-manifest", action="store_true",
                     help="Use the legacy single manifest from train_challenger.fetch_manifest")
     ap.add_argument("--n-score", type=int, default=4000)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--model-url", default=DEFAULT_KING_URL,
                     help="Hugging Face model URL or repo to download if king is incomplete")
@@ -348,6 +350,9 @@ def main() -> None:
     ap.add_argument("--summary-out", default="",
                     help="Output summary JSON; defaults to <work>/score_summary.json")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        log.info("no --seed provided; generated legacy step2 seed=%d", args.seed)
 
     work = Path(args.work)
     cache = work / "cache"

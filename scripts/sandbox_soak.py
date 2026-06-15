@@ -37,6 +37,7 @@ import csv
 import json
 import logging
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -255,7 +256,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iters", type=int, default=10)
     ap.add_argument("--noise", type=float, default=1e-4)
-    ap.add_argument("--base-seed", type=int, default=42)
+    ap.add_argument("--base-seed", type=int, default=None,
+                    help="Base seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--mode", choices=["noise", "symlink"], default="symlink",
                     help="symlink: chall = king bytewise (fast, leak-test only). "
                          "noise: full perturbation (slow, real-mining-like). "
@@ -277,6 +279,9 @@ def main():
     ap.add_argument("--keep-chall", action="store_true",
                     help="Don't delete challenger workspace after each iter (uses 163GB/iter)")
     args = ap.parse_args()
+    if args.base_seed is None:
+        args.base_seed = random.SystemRandom().randint(101, 2**32 - 1)
+        log.info("no --base-seed provided; generated soak base seed=%d", args.base_seed)
 
     # Sanity: server alive?
     if not server_health():

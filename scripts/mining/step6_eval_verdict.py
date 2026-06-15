@@ -199,13 +199,17 @@ def main() -> None:
                     help="Score summary JSON used to exclude train shards; defaults to <work>/score_summary.json")
     ap.add_argument("--n-eval", type=int, default=2000,
                     help="Total sequences for offline paired eval across datasets")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--n-bootstrap", type=int, default=10000)
     ap.add_argument("--verdict-out", default="",
                     help="Verdict JSON; defaults to <work>/verdict.json")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        log.info("no --seed provided; generated step6 seed=%d", args.seed)
 
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)

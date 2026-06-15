@@ -20,7 +20,6 @@ cmd=(
   --shard-start "${EVAL_SHARD_START}"
   --n-eval "${N_EVAL}"
   --seed "${SEED}"
-  --device "${DEVICE}"
   --batch-size "${BATCH_SIZE}"
   --n-bootstrap "${N_BOOTSTRAP}"
   --train-summary "${TRAIN_SUMMARY}"

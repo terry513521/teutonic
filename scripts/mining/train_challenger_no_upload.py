@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import shutil
 import sys
 import time
@@ -139,7 +140,8 @@ def main():
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed; omitted means choose a new seed greater than 100")
     ap.add_argument("--n-gpus", type=int, default=8)
     ap.add_argument("--noise-only", type=parse_false_only, default=False,
                     help="Compatibility no-op; only false/0/no is accepted")
@@ -148,6 +150,9 @@ def main():
     ap.add_argument("--report-out", default="",
                     help="Write a final JSON verdict to this path")
     args = ap.parse_args()
+    if args.seed is None:
+        args.seed = random.SystemRandom().randint(101, 2**32 - 1)
+        log.info("no --seed provided; generated no-upload training seed=%d", args.seed)
 
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
