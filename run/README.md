@@ -55,16 +55,18 @@ include:
 
 ## Useful overrides
 
-`step2_score_samples.py` defaults to 10,000 samples per dataset source,
-selecting up to 5 shards per source:
+`step2_score_samples.py` defaults to 30,000 samples per dataset source.
+For non-Quasar sources it selects up to 10 random shards and samples 3,000
+rows per shard:
 
-- `automathtext-v2`: 10,000 samples across up to 5 shards
-- `quasar-sn3`: 10,000 samples across up to 5 shards
-- `ultradata-math`: 10,000 samples across up to 5 shards
-- `finewebedu`: 10,000 samples across up to 5 shards
+- `automathtext-v2`: 30,000 samples across up to 10 shards
+- `quasar-sn3`: 30,000 samples with dataset-level random sampling
+- `ultradata-math`: 30,000 samples across up to 10 shards
+- `finewebedu`: 30,000 samples across up to 10 shards
 
-That produces 40,000 scored rows. If a dataset source has only one available
-shard, Step 2 selects all 10,000 samples from that shard.
+That produces up to 120,000 scored rows. If a non-Quasar source has fewer than
+10 available shards, Step 2 uses the available shard count and still samples
+up to 3,000 rows per selected shard.
 Each row preserves the original
 `train_challenger.py` scoring format: `shard`, `idx`, `loss`, `unique_r`,
 `rep_r`, `rep_ng4`, and `tokens`, with dataset metadata added for weighted
@@ -90,7 +92,7 @@ SEQUENTIAL_SHARDS=1 SHARD_START=0 run/step2_score_samples.sh
 ```
 
 ```bash
-N_SCORE=20000 TRAIN_PER_ITER=16000 VAL_SIZE=1000 run/run_mining_steps.sh step2 step3
+N_SCORE=60000 TRAIN_PER_ITER=16000 VAL_SIZE=1000 run/run_mining_steps.sh step2 step3
 N_GPUS=1 MICRO_BATCH=2 GRAD_ACCUM=2 LR=1e-5 EPOCHS=2 WARMUP_RATIO=0.03 EVAL_STEPS=150 run/run_mining_steps.sh step4
 N_EVAL=5000 BATCH_SIZE=4 run/run_mining_steps.sh step6
 ```

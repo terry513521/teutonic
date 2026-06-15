@@ -21,7 +21,7 @@ def main() -> None:
                     help="Training sequences to keep after bucketing")
     ap.add_argument("--val-size", type=int, default=600,
                     help="Validation sequences to keep after bucketing")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=2026)
     args = ap.parse_args()
 
     work = Path(args.work)

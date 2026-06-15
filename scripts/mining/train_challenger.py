@@ -621,10 +621,35 @@ def run_lora_training(base_model: str, train_p: Path, val_p: Path,
         "--learning-rate", str(args.lr),
         "--epochs", str(args.epochs),
         "--warmup-ratio", str(getattr(args, "warmup_ratio", 0.03)),
+        "--weight-decay", str(getattr(args, "weight_decay", 0.01)),
         "--lora-r", str(args.lora_r),
         "--lora-alpha", str(args.lora_alpha),
         "--lora-init", str(getattr(args, "lora_init", True)),
-        "--lora-dropout", "0.05",
+        "--lora-dropout", str(getattr(args, "lora_dropout", 0.05)),
+        "--adapter-type", str(getattr(args, "adapter_type", "lora")),
+        "--qlora-quant-type", str(getattr(args, "qlora_quant_type", "nf4")),
+        "--unsloth-gradient-checkpointing", str(getattr(args, "unsloth_gradient_checkpointing", "unsloth")),
+        "--unsloth-random-state", str(getattr(args, "unsloth_random_state", 3407)),
+        "--eva-rho", str(getattr(args, "eva_rho", 2.0)),
+        "--eva-tau", str(getattr(args, "eva_tau", 0.99)),
+        "--loftq-bits", str(getattr(args, "loftq_bits", 4)),
+        "--loftq-iter", str(getattr(args, "loftq_iter", 1)),
+        "--lora-ga-direction", str(getattr(args, "lora_ga_direction", "ArB2r")),
+        "--lora-ga-scale", str(getattr(args, "lora_ga_scale", "stable")),
+        "--lora-ga-stable-gamma", str(getattr(args, "lora_ga_stable_gamma", 16)),
+        "--adalora-target-r", str(getattr(args, "adalora_target_r", 8)),
+        "--adalora-init-r", str(getattr(args, "adalora_init_r", 12)),
+        "--adalora-tinit", str(getattr(args, "adalora_tinit", 0)),
+        "--adalora-tfinal", str(getattr(args, "adalora_tfinal", 0)),
+        "--adalora-delta-t", str(getattr(args, "adalora_delta_t", 1)),
+        "--adalora-beta1", str(getattr(args, "adalora_beta1", 0.85)),
+        "--adalora-beta2", str(getattr(args, "adalora_beta2", 0.85)),
+        "--adalora-orth-reg-weight", str(getattr(args, "adalora_orth_reg_weight", 0.5)),
+        "--vera-projection-prng-key", str(getattr(args, "vera_projection_prng_key", 0)),
+        "--vera-d-initial", str(getattr(args, "vera_d_initial", 0.1)),
+        "--loha-module-dropout", str(getattr(args, "loha_module_dropout", 0.0)),
+        "--lokr-module-dropout", str(getattr(args, "lokr_module_dropout", 0.0)),
+        "--lokr-decompose-factor", str(getattr(args, "lokr_decompose_factor", -1)),
         "--eval-steps", str(getattr(args, "eval_steps", 50)),
         "--save-steps", str(getattr(args, "save_steps", getattr(args, "eval_steps", 50))),
         "--save-total-limit", str(getattr(args, "save_total_limit", 0)),
@@ -636,6 +661,28 @@ def run_lora_training(base_model: str, train_p: Path, val_p: Path,
         cmd.append("--use-dora")
     if getattr(args, "use_rslora", False):
         cmd.append("--use-rslora")
+    if getattr(args, "use_qlora", False):
+        cmd.append("--use-qlora")
+    if getattr(args, "use_unsloth", False):
+        cmd.append("--use-unsloth")
+    if getattr(args, "use_delta_lora", False):
+        cmd.append("--use-delta-lora")
+    if getattr(args, "use_pissa", False):
+        cmd.append("--use-pissa")
+    if getattr(args, "use_corda", False):
+        cmd.append("--use-corda")
+    if getattr(args, "use_eva", False):
+        cmd.append("--use-eva")
+    if getattr(args, "eva_whiten", False):
+        cmd.append("--eva-whiten")
+    if getattr(args, "use_loftq", False):
+        cmd.append("--use-loftq")
+    if getattr(args, "use_lora_ga", False):
+        cmd.append("--use-lora-ga")
+    if not getattr(args, "vera_save_projection", True):
+        cmd.append("--no-vera-save-projection")
+    if getattr(args, "lokr_decompose_both", False):
+        cmd.append("--lokr-decompose-both")
     if getattr(args, "use_loraplus", False):
         cmd.extend(["--use-loraplus", "--loraplus-lr-ratio", str(getattr(args, "loraplus_lr_ratio", 16.0))])
     log.info("training: %s", " ".join(cmd))

@@ -34,24 +34,28 @@ MODEL_ALLOW_PATTERNS = [
     "*.model",
     "*.txt",
 ]
-DEFAULT_TARGET_SAMPLES_PER_DATASET = 10_000
-DEFAULT_SHARDS_PER_DATASET = 5
+DEFAULT_TARGET_SAMPLES_PER_DATASET = 30_000
+DEFAULT_SHARDS_PER_DATASET = 10
+DEFAULT_SAMPLES_PER_SHARD = 3_000
 DEFAULT_DATASET_PLAN = {
     "automathtext-v2": {
         "n_shards": DEFAULT_SHARDS_PER_DATASET,
         "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
+        "samples_per_shard": DEFAULT_SAMPLES_PER_SHARD,
     },
     "quasar-sn3": {
-        "n_shards": DEFAULT_SHARDS_PER_DATASET,
+        "n_shards": 5,
         "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
     },
     "ultradata-math": {
         "n_shards": DEFAULT_SHARDS_PER_DATASET,
         "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
+        "samples_per_shard": DEFAULT_SAMPLES_PER_SHARD,
     },
     "finewebedu": {
         "n_shards": DEFAULT_SHARDS_PER_DATASET,
         "target_samples": DEFAULT_TARGET_SAMPLES_PER_DATASET,
+        "samples_per_shard": DEFAULT_SAMPLES_PER_SHARD,
     },
 }
 DEFAULT_MIN_FREE_GB = 5.0

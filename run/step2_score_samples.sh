@@ -2,15 +2,16 @@
 set -euo pipefail
 
 # Defaults to the built-in dataset plan:
-# 10,000 samples per dataset source, selecting up to 5 shards per source.
-# If a source has only one available shard, all 10,000 samples come from it.
+# 30,000 samples per dataset source. Non-Quasar sources select up to 10
+# random shards and sample 3,000 rows per shard; Quasar keeps dataset-level
+# sampling.
 
 USER_SEED="${SEED:-}"
 
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-N_SCORE="${N_SCORE:-40000}"
+N_SCORE="${N_SCORE:-120000}"
 SHARD_START="${SHARD_START:-0}"
 RANDOM_SHARDS="${RANDOM_SHARDS:-1}"
 MIN_FREE_GB="${MIN_FREE_GB:-5}"
