@@ -80,12 +80,3 @@ append_random_shards_arg() {
   return 0
 }
 
-append_step2_shard_selection_arg() {
-  local -n arr_ref=$1
-  if [[ "${SEQUENTIAL_SHARDS:-0}" == "1" || "${SEQUENTIAL_SHARDS:-0}" == "true" || "${RANDOM_SHARDS:-1}" == "0" || "${RANDOM_SHARDS:-1}" == "false" ]]; then
-    arr_ref+=(--sequential-shards)
-  else
-    arr_ref+=(--random-shards)
-  fi
-  return 0
-}

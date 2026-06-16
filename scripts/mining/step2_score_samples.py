@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Step 2: pull weighted multi-dataset shards and score samples with the king."""
+"""Step 2: load cached weighted multi-dataset shards and score samples with the king."""
 from __future__ import annotations
 
 import argparse
@@ -11,12 +11,15 @@ import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
-from challenger_step_lib import default_scoring_devices, read_json, score_samples, write_json
+from challenger_step_lib import (
+    default_scoring_devices,
+    load_cached_shard,
+    read_json,
+    score_samples,
+    write_json,
+)
 from train_challenger import (
-    DEFAULT_DATASETS,
-    download_shard,
     fetch_manifest_url,
-    load_shard,
     log,
     sha256_dir,
 )
@@ -35,32 +38,8 @@ MODEL_ALLOW_PATTERNS = [
     "*.txt",
 ]
 
-NUM = 200000
-SHARD_NUM = 20
-
-DEFAULT_DATASET_PLAN = {
-    "automathtext-v2": {
-        "n_shards": SHARD_NUM,
-        "target_samples": NUM * 0.35,
-        "samples_per_shard": NUM * 0.35 / SHARD_NUM,
-    },
-    "quasar-sn3": {
-        "n_shards": 1,
-        "target_samples": NUM * 0.05,
-    },
-    "ultradata-math": {
-        "n_shards": SHARD_NUM,
-        "target_samples": NUM * 0.35,
-        "samples_per_shard": NUM * 0.35 / SHARD_NUM,
-    },
-    "finewebedu": {
-        "n_shards": 10,
-        "target_samples": NUM*0.25,
-        "samples_per_shard": 5000,
-    },
-}
 DEFAULT_MIN_FREE_GB = 5.0
-DEFAULT_SHARDS_PER_DATASET = SHARD_NUM
+DEFAULT_DATASETS_CONFIG = Path(__file__).parents[2] / "run" / "datasets.json"
 
 
 def repo_from_hf_link(model: str) -> str:
@@ -234,20 +213,29 @@ def resolve_king_dir(
 
 def load_dataset_specs(datasets_config: str) -> list[dict]:
     if not datasets_config:
-        return [
-            {
-                **dict(spec),
-                **DEFAULT_DATASET_PLAN.get(spec["name"], {}),
-            }
-            for spec in DEFAULT_DATASETS
-        ]
+        raise ValueError("--datasets-config is required; use run/datasets.json")
     path = Path(datasets_config)
     data = json.loads(path.read_text()) if path.exists() else json.loads(datasets_config)
     if isinstance(data, dict):
         data = data.get("datasets", data.get("items", []))
     if not isinstance(data, list) or not data:
         raise ValueError("datasets config must be a non-empty list")
-    return data
+    specs = [dict(spec) for spec in data]
+
+    missing_weights = [spec for spec in specs if "weight" not in spec]
+    if missing_weights:
+        totals = [target_samples_for_spec(spec, fallback_total=1) for spec in specs]
+        total = sum(totals)
+        if total <= 0:
+            raise ValueError("dataset sample totals must be positive to infer weights")
+        for spec, count in zip(specs, totals):
+            spec.setdefault("weight", count / total)
+    weight_total = sum(float(spec.get("weight", 0.0)) for spec in specs)
+    if weight_total <= 0:
+        raise ValueError("dataset weights must sum to a positive value")
+    for spec in specs:
+        spec["weight"] = float(spec["weight"]) / weight_total
+    return specs
 
 
 def target_samples_for_spec(spec: dict, fallback_total: int | None = None) -> int:
@@ -263,30 +251,6 @@ def target_samples_for_spec(spec: dict, fallback_total: int | None = None) -> in
         f"dataset {spec.get('name', '<unknown>')} needs samples, target_samples, "
         "or samples_per_shard"
     )
-
-
-def select_shard_indices(
-    n_shards: int,
-    n_manifest_shards: int,
-    seed: int,
-    random_shards: bool,
-    shard_start: int,
-) -> list[int]:
-    if n_manifest_shards <= 0:
-        raise ValueError("manifest has no shards")
-    if n_shards > n_manifest_shards:
-        raise ValueError(
-            f"requested {n_shards} shards, but manifest only has {n_manifest_shards}"
-        )
-    if random_shards:
-        return sorted(random.Random(seed).sample(range(n_manifest_shards), n_shards))
-    end = shard_start + n_shards
-    if end > n_manifest_shards:
-        raise ValueError(
-            f"requested shard range [{shard_start}, {end}) exceeds manifest size "
-            f"{n_manifest_shards}"
-        )
-    return list(range(shard_start, end))
 
 
 def cached_manifest_records(dataset_cache: Path, manifest: dict) -> list[tuple[int, dict, Path]]:
@@ -315,25 +279,15 @@ def select_cached_records(
     records: list[tuple[int, dict, Path]],
     n_shards: int,
     seed: int,
-    random_shards: bool,
-    shard_start: int,
 ) -> list[tuple[int, dict, Path]]:
     if n_shards > len(records):
         raise ValueError(
             f"requested {n_shards} cached shards, but only {len(records)} cached shards are available"
         )
-    if random_shards:
-        return sorted(
-            random.Random(seed).sample(records, n_shards),
-            key=lambda item: item[2].name,
-        )
-    end = shard_start + n_shards
-    if end > len(records):
-        raise ValueError(
-            f"requested cached shard range [{shard_start}, {end}) exceeds cached shard count "
-            f"{len(records)}"
-        )
-    return records[shard_start:end]
+    return sorted(
+        random.Random(seed).sample(records, n_shards),
+        key=lambda item: item[2].name,
+    )
 
 
 def load_weighted_dataset_shards(
@@ -342,14 +296,10 @@ def load_weighted_dataset_shards(
     sample_counts: dict[str, int],
     n_shards_per_dataset: int,
     seed: int,
-    random_shards: bool,
-    shard_start: int,
-    cache_only: bool,
     dataset_cache_root: Path | None = None,
 ) -> tuple[list, list[dict]]:
     shards = []
     shard_records = []
-    shard_idx = 0
 
     for spec_idx, spec in enumerate(datasets):
         name = spec["name"]
@@ -360,82 +310,40 @@ def load_weighted_dataset_shards(
         requested_n_shards = int(spec.get("n_shards", n_shards_per_dataset))
         dataset_cache = (dataset_cache_root or (work / "cache" / "datasets")) / name
         manifest = fetch_manifest_url(dataset_cache, manifest_url)
-        selected_records: list[tuple[int, dict, Path]]
-        if cache_only:
-            cached_records = cached_manifest_records(dataset_cache, manifest)
-            if not cached_records:
-                raise ValueError(f"dataset {name} has no cached shards under {dataset_cache}")
-            n_shards = min(requested_n_shards, len(cached_records))
-            if n_shards < requested_n_shards:
-                log.info(
-                    "dataset %s: requested %d cached shards but only %d available; using %d",
-                    name,
-                    requested_n_shards,
-                    len(cached_records),
-                    n_shards,
-                )
-            selected_records = select_cached_records(
-                cached_records,
-                n_shards,
-                seed + spec_idx,
-                random_shards,
-                shard_start,
+        cached_records = cached_manifest_records(dataset_cache, manifest)
+        if not cached_records:
+            raise ValueError(
+                f"dataset {name} has no cached shards under {dataset_cache}. "
+                "Run run/download_dataset_shards.sh before scoring."
             )
-        else:
-            n_manifest_shards = len(manifest["shards"])
-            n_shards = min(requested_n_shards, n_manifest_shards)
-            if n_shards < requested_n_shards:
-                log.info(
-                    "dataset %s: requested %d shards but manifest has %d; using %d",
-                    name,
-                    requested_n_shards,
-                    n_manifest_shards,
-                    n_shards,
-                )
-            shard_indices = select_shard_indices(
-                n_shards,
-                n_manifest_shards,
-                seed + spec_idx,
-                random_shards,
-                shard_start,
-            )
-            selected_records = [
-                (
-                    manifest_shard_idx,
-                    manifest["shards"][manifest_shard_idx],
-                    dataset_cache / "shards" / Path(manifest["shards"][manifest_shard_idx]["key"]).name,
-                )
-                for manifest_shard_idx in shard_indices
-            ]
-        shard_indices = [idx for idx, _, _ in selected_records]
-        if cache_only:
+        n_shards = min(requested_n_shards, len(cached_records))
+        if n_shards < requested_n_shards:
             log.info(
-                "dataset %s: weight=%.2f target_samples=%d samples_per_shard=%s cached_shards=%s tokenizer=%s",
+                "dataset %s: requested %d cached shards but only %d available; using %d",
                 name,
-                weight,
-                target_samples,
-                samples_per_shard or "auto",
-                [path.name for _, _, path in selected_records],
-                manifest.get("tokenizer"),
+                requested_n_shards,
+                len(cached_records),
+                n_shards,
             )
-        else:
-            log.info(
-                "dataset %s: weight=%.2f target_samples=%d samples_per_shard=%s shards=%s tokenizer=%s",
-                name,
-                weight,
-                target_samples,
-                samples_per_shard or "auto",
-                shard_indices,
-                manifest.get("tokenizer"),
-            )
+        selected_records = select_cached_records(
+            cached_records,
+            n_shards,
+            seed + spec_idx,
+        )
+        log.info(
+            "dataset %s: weight=%.2f target_samples=%d samples_per_shard=%s cached_shards=%s tokenizer=%s",
+            name,
+            weight,
+            target_samples,
+            samples_per_shard or "auto",
+            [path.name for _, _, path in selected_records],
+            manifest.get("tokenizer"),
+        )
 
         for manifest_shard_idx, shard_info, path in selected_records:
             key = shard_info["key"]
-            if cache_only:
-                log.info("using cached shard: %s", path)
-            else:
-                download_shard(key, path, manifest=manifest)
-            arr, _ = load_shard(path)
+            log.info("using cached shard: %s", path)
+            arr, _ = load_cached_shard(path)
             log.info(
                 "loaded dataset %s shard %d: %d sequences",
                 name,
@@ -457,7 +365,6 @@ def load_weighted_dataset_shards(
                 record["target_samples_per_shard"] = samples_per_shard
             shards.append(arr)
             shard_records.append(record)
-            shard_idx += 1
 
     return shards, shard_records
 
@@ -468,17 +375,10 @@ def main() -> None:
                     help="Pipeline work directory")
     ap.add_argument("--king-dir", default="/workspace/teutonic-mining/work/king",
                     help="King model dir; defaults to king_dir in <work>/king.json or <work>/king")
-    ap.add_argument("--datasets-config", default="",
-                    help="Optional JSON file/list overriding DEFAULT_DATASETS")
-    ap.add_argument("--n-shards-per-dataset", type=int, default=DEFAULT_SHARDS_PER_DATASET,
-                    help="Number of shards to download per dataset manifest")
-    ap.add_argument("--shard-start", type=int, default=0,
-                    help="Index of first shard only when using --sequential-shards")
-    ap.add_argument("--random-shards", dest="random_shards", action="store_true",
-                    default=True,
-                    help="Randomly sample shards per dataset with --seed (default)")
-    ap.add_argument("--sequential-shards", dest="random_shards", action="store_false",
-                    help="Select contiguous shard ranges starting at --shard-start")
+    ap.add_argument("--datasets-config", default=str(DEFAULT_DATASETS_CONFIG),
+                    help="Dataset JSON config; defaults to run/datasets.json")
+    ap.add_argument("--n-shards-per-dataset", type=int, default=1,
+                    help="Fallback cached shard count only for dataset specs without n_shards")
     ap.add_argument("--n-score", type=int, default=20000,
                     help="Total sequences to score when dataset specs do not set samples_per_shard")
     ap.add_argument("--seed", type=int, default=None,
@@ -490,6 +390,12 @@ def main() -> None:
     )
     ap.add_argument("--per-device-batch-size", type=int, default=8,
                     help="Sequences scored per GPU per forward pass")
+    ap.add_argument("--lm-head-chunk", type=int, default=int(os.environ.get("STEP2_LM_HEAD_CHUNK", "512")),
+                    help="Token positions per LM-head loss chunk; higher is faster but uses more VRAM")
+    ap.add_argument("--empty-cache-every", type=int, default=int(os.environ.get("STEP2_EMPTY_CACHE_EVERY", "0")),
+                    help="Call torch.cuda.empty_cache every N scoring batches; 0 disables")
+    ap.add_argument("--attn-implementation", default=os.environ.get("STEP2_ATTN_IMPLEMENTATION", "auto"),
+                    help="Transformers attention backend for scoring: auto, flash_attention_2, sdpa, or eager")
     ap.add_argument("--model-url", default=DEFAULT_KING_URL,
                     help="Hugging Face model URL or repo to download if king is incomplete")
     ap.add_argument("--repo", default="",
@@ -500,8 +406,6 @@ def main() -> None:
                     help="Hugging Face token; defaults to HF_TOKEN")
     ap.add_argument("--download-workers", type=int, default=16,
                     help="Parallel workers if step2 must download a missing/incomplete king")
-    ap.add_argument("--cache-only", action="store_true",
-                    help="Select dataset shards only from the dataset cache and never download missing shards")
     ap.add_argument("--dataset-cache", default="",
                     help="Dataset cache root; defaults to <work>/cache/datasets")
     ap.add_argument("--scored-out", default="",
@@ -559,9 +463,6 @@ def main() -> None:
         sample_counts,
         args.n_shards_per_dataset,
         args.seed,
-        args.random_shards,
-        args.shard_start,
-        args.cache_only,
         dataset_cache_root,
     )
 
@@ -574,6 +475,9 @@ def main() -> None:
         scored_out,
         shard_records=shard_records,
         per_device_batch_size=args.per_device_batch_size,
+        attn_implementation=args.attn_implementation,
+        lm_head_chunk=args.lm_head_chunk,
+        empty_cache_every=args.empty_cache_every,
     )
     summary.update({
         "king_dir": str(king_dir),
@@ -585,6 +489,9 @@ def main() -> None:
         "sample_counts": sample_counts,
         "n_score_requested": n_score,
         "per_device_batch_size": args.per_device_batch_size,
+        "attn_implementation": args.attn_implementation,
+        "lm_head_chunk": args.lm_head_chunk,
+        "empty_cache_every": args.empty_cache_every,
         "train_shards": shard_records,
         "seed": args.seed,
     })

@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""Step 2: pull training shards and score sample sequences with the king."""
+"""Step 2: load cached training shards and score sample sequences with the king."""
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import random
-import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
 from huggingface_hub import snapshot_download
 
-from challenger_step_lib import read_json, score_samples, write_json
-from train_challenger import download_shard, fetch_manifest, load_shard, log, sha256_dir
+from challenger_step_lib import load_cached_shard, read_json, score_samples, write_json
+from train_challenger import fetch_manifest, log, sha256_dir
 
 
 DEFAULT_KING_URL = (
@@ -31,7 +29,6 @@ MODEL_ALLOW_PATTERNS = [
     "*.model",
     "*.txt",
 ]
-DEFAULT_DATASET_CONFIG = Path(__file__).with_name("datasets.txt")
 
 
 def repo_from_hf_link(model: str) -> str:
@@ -82,159 +79,6 @@ def king_revision_from_meta(meta: dict) -> str:
         or dashboard_king.get("revision")
         or ""
     )
-
-
-def dataset_base_url(manifest_url: str) -> str:
-    parsed = urlparse(manifest_url)
-    marker = "/dataset/"
-    if marker not in parsed.path:
-        raise ValueError(f"manifest URL must contain /dataset/: {manifest_url!r}")
-    base_path = parsed.path.split(marker, 1)[0].rstrip("/")
-    return f"{parsed.scheme}://{parsed.netloc}{base_path}"
-
-
-def dataset_name_from_manifest_url(manifest_url: str) -> str:
-    parsed = urlparse(manifest_url)
-    parts = [part for part in parsed.path.split("/") if part]
-    try:
-        dataset_idx = parts.index("dataset")
-    except ValueError as exc:
-        raise ValueError(f"manifest URL must contain /dataset/: {manifest_url!r}") from exc
-    if dataset_idx + 1 >= len(parts):
-        raise ValueError(f"manifest URL is missing dataset name: {manifest_url!r}")
-    name = parts[dataset_idx + 1]
-    for suffix in ("-quasar-10b", "-qwen3-8b"):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-    return name
-
-
-def read_dataset_config(path: Path) -> list[dict]:
-    """Parse datasets.txt into weighted manifest entries.
-
-    The file format is intentionally simple:
-      - first section: manifest URLs
-      - second section: "<dataset-name>: <ratio>" or "<dataset-name>: <N> shard(s)"
-
-    Fixed shard counts are reserved first. Remaining --n-shards budget is split
-    across ratio entries.
-    """
-    urls: list[str] = []
-    ratios: dict[str, float] = {}
-    fixed_counts: dict[str, int] = {}
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith(("http://", "https://")):
-            urls.append(line)
-            continue
-        if ":" in line:
-            name, value = line.split(":", 1)
-            name = name.strip()
-            value = value.strip().lower()
-            if "shard" in value:
-                fixed_counts[name] = int(value.split()[0])
-            else:
-                ratios[name] = float(value)
-
-    entries = []
-    for url in urls:
-        name = dataset_name_from_manifest_url(url)
-        if name not in ratios and name not in fixed_counts:
-            log.info("ignoring dataset manifest without ratio/count: name=%s url=%s", name, url)
-            continue
-        entry = {
-            "name": name,
-            "manifest_url": url,
-            "base_url": dataset_base_url(url),
-        }
-        if name in fixed_counts:
-            entry["fixed_count"] = fixed_counts[name]
-        if name in ratios:
-            entry["ratio"] = ratios[name]
-        entries.append(entry)
-
-    requested_names = set(ratios) | set(fixed_counts)
-    missing = sorted(requested_names - {entry["name"] for entry in entries})
-    if missing:
-        raise ValueError(f"dataset entries have no matching manifest URLs: {missing}")
-    if not entries:
-        raise ValueError(f"no datasets found in {path}")
-
-    weighted_entries = [entry for entry in entries if "ratio" in entry]
-    total = sum(entry["ratio"] for entry in weighted_entries)
-    if weighted_entries and total <= 0:
-        raise ValueError("dataset ratios must sum to a positive number")
-    for entry in weighted_entries:
-        entry["weight"] = entry["ratio"] / total
-    return entries
-
-
-def allocate_counts(total: int, weights: list[float]) -> list[int]:
-    if total < 0:
-        raise ValueError("total shard count cannot be negative")
-    raw = [total * weight for weight in weights]
-    counts = [int(value) for value in raw]
-    remainder = total - sum(counts)
-    order = sorted(range(len(weights)), key=lambda i: raw[i] - counts[i], reverse=True)
-    for i in order[:remainder]:
-        counts[i] += 1
-    return counts
-
-
-def allocate_dataset_counts(total: int, entries: list[dict]) -> list[int]:
-    fixed_total = sum(entry.get("fixed_count", 0) for entry in entries)
-    if fixed_total > total:
-        raise ValueError(
-            f"fixed dataset shard count ({fixed_total}) exceeds --n-shards ({total})"
-        )
-
-    counts = [entry.get("fixed_count", 0) for entry in entries]
-    weighted_indices = [i for i, entry in enumerate(entries) if "weight" in entry]
-    weighted_budget = total - fixed_total
-    weighted_counts = allocate_counts(
-        weighted_budget,
-        [entries[i]["weight"] for i in weighted_indices],
-    )
-    for idx, count in zip(weighted_indices, weighted_counts):
-        counts[idx] += count
-    return counts
-
-
-def fetch_manifest_url(entry: dict, cache: Path) -> dict:
-    manifest_path = cache / entry["name"] / "manifest.json"
-    if not manifest_path.exists():
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        log.info("downloading %s manifest from %s", entry["name"], entry["manifest_url"])
-        subprocess.check_call(["curl", "-fsSL", "-o", str(manifest_path), entry["manifest_url"]])
-    return json.loads(manifest_path.read_text())
-
-
-def download_dataset_shard(entry: dict, shard_key: str, out: Path) -> Path:
-    if out.exists() and out.stat().st_size > 1024:
-        log.info("shard cached: %s (%.1f GB)", out, out.stat().st_size / 1e9)
-        return out
-    url = f"{entry['base_url'].rstrip('/')}/{shard_key.lstrip('/')}"
-    log.info("downloading %s:%s -> %s", entry["name"], shard_key, out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.check_call(["curl", "-fsSL", "-o", str(out), url])
-    return out
-
-
-def select_shard_indices(start: int, count: int, reserved_idx: int, total_available: int) -> list[int]:
-    selected = []
-    idx = start
-    while len(selected) < count and idx < total_available:
-        if idx != reserved_idx:
-            selected.append(idx)
-        idx += 1
-    if len(selected) < count:
-        raise ValueError(
-            f"requested {count} shards from start={start}, but only selected "
-            f"{len(selected)} before manifest ended at {total_available}"
-        )
-    return selected
 
 
 def candidate_king_meta_paths(work: Path) -> list[Path]:
@@ -322,15 +166,11 @@ def main() -> None:
     ap.add_argument("--king-dir", default="",
                     help="King model dir; defaults to king_dir in <work>/king.json or <work>/king")
     ap.add_argument("--n-shards", type=int, default=2,
-                    help="Number of training dataset shards to download")
+                    help="Number of cached training dataset shards to load")
     ap.add_argument("--shard-start", type=int, default=0,
                     help="Index of first training shard")
     ap.add_argument("--eval-shard", type=int, default=10,
                     help="Reserved held-out shard index; must not overlap training shards")
-    ap.add_argument("--dataset-config", default=str(DEFAULT_DATASET_CONFIG),
-                    help="datasets.txt with manifest URLs and dataset ratios")
-    ap.add_argument("--single-manifest", action="store_true",
-                    help="Use the legacy single manifest from train_challenger.fetch_manifest")
     ap.add_argument("--n-score", type=int, default=4000)
     ap.add_argument("--seed", type=int, default=None,
                     help="Random seed; omitted means choose a new seed greater than 100")
@@ -372,7 +212,6 @@ def main() -> None:
 
     shards = []
     shard_records = []
-    # if args.single_manifest:
     train_shard_idxs = list(range(args.shard_start, args.shard_start + args.n_shards))
     if args.eval_shard in train_shard_idxs:
         raise ValueError("eval_shard cannot overlap training shards")
@@ -381,8 +220,13 @@ def main() -> None:
     for idx in train_shard_idxs:
         key = manifest["shards"][idx]["key"]
         path = cache / Path(key).name
-        download_shard(key, path)
-        arr, _ = load_shard(path)
+        if not path.is_file() or path.stat().st_size <= 1024:
+            raise FileNotFoundError(
+                f"training shard {idx} is not cached at {path}. "
+                "Download dataset shards before running legacy step2."
+            )
+        log.info("using cached training shard %d: %s", idx, path)
+        arr, _ = load_cached_shard(path)
         log.info("loaded training shard %d: %d sequences", idx, len(arr))
         shards.append(arr)
         shard_records.append({
@@ -392,48 +236,6 @@ def main() -> None:
             "path": str(path),
             "n_sequences": len(arr),
         })
-    # else:
-    #     dataset_entries = read_dataset_config(Path(args.dataset_config))
-    #     counts = allocate_dataset_counts(args.n_shards, dataset_entries)
-    #     log.info(
-    #         "dataset shard mix: %s",
-    #         ", ".join(
-    #             f"{entry['name']}={count} "
-    #             f"({entry.get('ratio', str(entry.get('fixed_count')) + ' shard')})"
-    #             for entry, count in zip(dataset_entries, counts)
-    #         ),
-    #     )
-    #     for entry, count in zip(dataset_entries, counts):
-    #         if count == 0:
-    #             continue
-    #         manifest = fetch_manifest_url(entry, cache)
-    #         selected_indices = select_shard_indices(
-    #             args.shard_start,
-    #             count,
-    #             args.eval_shard,
-    #             len(manifest["shards"]),
-    #         )
-    #         for idx in selected_indices:
-    #             key = manifest["shards"][idx]["key"]
-    #             path = cache / entry["name"] / Path(key).name
-    #             download_dataset_shard(entry, key, path)
-    #             arr, _ = load_shard(path)
-    #             log.info(
-    #                 "loaded %s training shard %d: %d sequences",
-    #                 entry["name"],
-    #                 idx,
-    #                 len(arr),
-    #             )
-    #             shards.append(arr)
-    #             shard_records.append({
-    #                 "dataset": entry["name"],
-    #                 "ratio": entry.get("ratio"),
-    #                 "fixed_count": entry.get("fixed_count"),
-    #                 "idx": idx,
-    #                 "key": key,
-    #                 "path": str(path),
-    #                 "n_sequences": len(arr),
-    #             })
 
     summary = score_samples(str(king_dir), shards, args.n_score, args.seed, args.device, scored_out)
     summary.update({

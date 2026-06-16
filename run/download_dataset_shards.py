@@ -101,6 +101,8 @@ def download_shard(
                 "-x", str(connections),
                 "-s", str(connections),
                 "-k", "1M",
+                "--file-allocation=none",
+                "--disk-cache=256M",
                 "--max-tries", str(retries),
                 "--retry-wait", "2",
                 "--summary-interval", "30",

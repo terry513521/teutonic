@@ -3,14 +3,28 @@
     "name": "ultradata-math",
     "manifest_url": "https://us-east-1.hippius.com/teutonic-sn3/dataset/ultradata-math-quasar-10b/manifest.json",
     "n_shards": 20,
-    "target_samples": 60000,
-    "samples_per_shard": 3000
+    "target_samples": 35000,
+    "samples_per_shard": 1750
   },
   {
     "name": "finewebedu",
     "manifest_url": "https://eu-central-1.hippius.com/teutonic-sn3/dataset/finewebedu/manifest.json",
     "n_shards": 10,
-    "target_samples": 60000,
-    "samples_per_shard": 6000
+    "target_samples": 25000,
+    "samples_per_shard": 2500
+  },
+  {
+    "name": "quasar-sn3",
+    "manifest_url": "https://us-east-1.hippius.com/teutonic-sn3/dataset/quasar-sn3-retok/manifest.json",
+    "n_shards": 1,
+    "target_samples": 5000,
+    "samples_per_shard": 5000
+  },
+  {
+    "name": "automathtext-v2",
+    "manifest_url": "https://eu-central-1.hippius.com/teutonic-sn3/dataset/automathtext-v2-quasar-10b/manifest.json",
+    "n_shards": 20,
+    "target_samples": 35000,
+    "samples_per_shard": 1750
   }
 ]

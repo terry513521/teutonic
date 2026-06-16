@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import collections
 from concurrent.futures import ThreadPoolExecutor
+import importlib.util
 import json
+import os
 import shutil
 import ctypes
 import inspect
@@ -24,6 +26,7 @@ from train_challenger import (
     EVAL_DELTA,
     filter_indices_by_vocab,
     log,
+    SEQ_LEN,
     sha256_dir,
 )
 
@@ -37,6 +40,8 @@ HIPPIUS_MODEL_ALLOW_PATTERNS = [
     "*.txt",
 ]
 
+DEFAULT_ATTN_IMPLEMENTATION = os.environ.get("STEP2_ATTN_IMPLEMENTATION", "auto")
+
 
 def read_json(path: str | Path) -> dict:
     return json.loads(Path(path).read_text())
@@ -48,6 +53,77 @@ def write_json(path: str | Path, data: dict) -> None:
     tmp = out.with_name(f".{out.name}.tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n")
     tmp.replace(out)
+
+
+def load_cached_shard(path: Path, seq_len: int = SEQ_LEN) -> tuple[np.ndarray, int]:
+    """Load a cached .npy shard lazily so scoring does not pre-read whole files."""
+    arr = np.load(path, mmap_mode="r")
+    if arr.ndim not in (1, 2):
+        raise ValueError(f"unexpected shard shape {arr.shape}")
+    flat = arr.reshape(-1)
+    n_seq = flat.size // seq_len
+    if n_seq <= 0:
+        raise ValueError(f"shard {path} has too few tokens for seq_len={seq_len}")
+    return flat[: n_seq * seq_len].reshape(n_seq, seq_len), seq_len
+
+
+def configure_cuda_inference() -> None:
+    """Enable safe CUDA inference fast paths before model loading."""
+    if not torch.cuda.is_available():
+        return
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
+    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        torch.backends.cuda.enable_flash_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_math_sdp"):
+        torch.backends.cuda.enable_math_sdp(True)
+
+
+def load_causal_lm_for_scoring(
+    model_dir: str,
+    device: str,
+    attn_implementation: str = DEFAULT_ATTN_IMPLEMENTATION,
+):
+    base_kwargs = {
+        "torch_dtype": torch.bfloat16,
+        "device_map": {"": device},
+        "use_safetensors": True,
+        "trust_remote_code": True,
+        "low_cpu_mem_usage": True,
+    }
+    if attn_implementation and attn_implementation != "auto":
+        attempts = [attn_implementation]
+    else:
+        attempts = []
+        if importlib.util.find_spec("flash_attn") is not None:
+            attempts.append("flash_attention_2")
+        attempts.extend(["sdpa", ""])
+
+    errors = []
+    for impl in attempts:
+        kwargs = dict(base_kwargs)
+        if impl:
+            kwargs["attn_implementation"] = impl
+        try:
+            model = AutoModelForCausalLM.from_pretrained(model_dir, **kwargs)
+            log.info("loaded scorer on %s with attn_implementation=%s", device, impl or "default")
+            break
+        except Exception as exc:
+            errors.append(f"{impl or 'default'}: {exc}")
+            if attn_implementation and attn_implementation != "auto":
+                raise
+            log.info("attn_implementation=%s unavailable on %s; trying fallback", impl or "default", device)
+    else:
+        raise RuntimeError("failed to load scorer model: " + " | ".join(errors))
+
+    if hasattr(model, "config"):
+        model.config.use_cache = False
+    model.eval()
+    return model
 
 
 def default_scoring_devices() -> str:
@@ -80,6 +156,34 @@ def parse_scoring_devices(device: str) -> list[str]:
             devices.append(part)
     if len(devices) > 1 and any(not dev.startswith("cuda") for dev in devices):
         raise ValueError("multi-device scoring currently requires CUDA devices")
+    if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        valid_devices = []
+        for dev in devices:
+            if not dev.startswith("cuda"):
+                valid_devices.append(dev)
+                continue
+            if dev == "cuda":
+                idx = torch.cuda.current_device()
+            else:
+                try:
+                    idx = int(dev.split(":", 1)[1])
+                except (IndexError, ValueError) as exc:
+                    raise ValueError(f"invalid CUDA device specifier: {dev}") from exc
+            if 0 <= idx < device_count:
+                valid_devices.append(f"cuda:{idx}")
+            else:
+                log.warning(
+                    "skipping unavailable CUDA device %s; only %d visible CUDA device(s)",
+                    dev,
+                    device_count,
+                )
+        devices = valid_devices
+    elif any(dev.startswith("cuda") for dev in devices):
+        log.warning("CUDA requested (%s) but torch.cuda is unavailable; using CPU", ",".join(devices))
+        devices = ["cpu"]
+    if not devices:
+        raise ValueError("no usable scoring devices after validating --device")
     return devices
 
 
@@ -186,11 +290,18 @@ def score_samples(
     out_path: Path,
     shard_records: list[dict] | None = None,
     per_device_batch_size: int = 8,
+    attn_implementation: str = DEFAULT_ATTN_IMPLEMENTATION,
+    lm_head_chunk: int = 512,
+    empty_cache_every: int = 0,
 ) -> dict:
     if shard_records is not None and len(shard_records) != len(shards):
         raise ValueError("shard_records length must match shards length")
     if per_device_batch_size <= 0:
         raise ValueError("per_device_batch_size must be positive")
+    if lm_head_chunk <= 0:
+        raise ValueError("lm_head_chunk must be positive")
+    if empty_cache_every < 0:
+        raise ValueError("empty_cache_every cannot be negative")
 
     rng = np.random.default_rng(seed)
     cands = []
@@ -236,17 +347,18 @@ def score_samples(
 
     devices = parse_scoring_devices(device)
     log.info("scoring %d samples with king on %s", len(cands), ",".join(devices))
+    configure_cuda_inference()
     preload_cuda_runtime()
     add_model_dir_to_pythonpath(king_dir)
     patch_transformers_masking_utils()
     scorers = []
     for scorer_device in devices:
         log.info("loading king scorer replica on %s", scorer_device)
-        model = AutoModelForCausalLM.from_pretrained(
-            king_dir, torch_dtype=torch.bfloat16, device_map={"": scorer_device},
-            use_safetensors=True, trust_remote_code=True,
+        model = load_causal_lm_for_scoring(
+            king_dir,
+            scorer_device,
+            attn_implementation=attn_implementation,
         )
-        model.eval()
         scorers.append((model, scorer_device))
     vocab_size = min(
         int(getattr(model.config, "vocab_size", None) or model.lm_head.out_features)
@@ -293,32 +405,37 @@ def score_samples(
     losses_by_order: list[float | None] = [None] * len(cands)
 
     for scorer_idx, (model, scorer_device) in enumerate(scorers):
-        warmup_indices = list(range(scorer_idx, len(cands), len(scorers)))[:per_device_batch_size]
-        if not warmup_indices:
+        warmup_indices = range(scorer_idx, len(cands), len(scorers))[:per_device_batch_size]
+        if len(warmup_indices) == 0:
             continue
-        warmup_toks = [
-            shards[cands[order_idx][0]][cands[order_idx][1]].tolist()
+        warmup_toks = np.stack([
+            shards[cands[order_idx][0]][cands[order_idx][1]]
             for order_idx in warmup_indices
-        ]
-        log.info("warming scorer replica on %s with %d samples", scorer_device, len(warmup_toks))
-        compute_per_seq_loss(model, warmup_toks, scorer_device)
+        ], axis=0)
+        log.info("warming scorer replica on %s with %d samples", scorer_device, warmup_toks.shape[0])
+        compute_per_seq_loss(model, warmup_toks, scorer_device, chunk=lm_head_chunk)
 
     def score_partition(scorer_idx: int, scorer: tuple) -> list[tuple[int, float]]:
         model, scorer_device = scorer
-        assigned = list(range(scorer_idx, len(cands), len(scorers)))
+        assigned = range(scorer_idx, len(cands), len(scorers))
         results: list[tuple[int, float]] = []
         t0 = time.time()
         for start in range(0, len(assigned), per_device_batch_size):
             order_indices = assigned[start:start + per_device_batch_size]
-            toks = [
-                shards[cands[order_idx][0]][cands[order_idx][1]].tolist()
+            toks = np.stack([
+                shards[cands[order_idx][0]][cands[order_idx][1]]
                 for order_idx in order_indices
-            ]
-            batch_losses = compute_per_seq_loss(model, toks, scorer_device)
+            ], axis=0)
+            batch_losses = compute_per_seq_loss(model, toks, scorer_device, chunk=lm_head_chunk)
             results.extend(
                 (order_idx, float(loss))
                 for order_idx, loss in zip(order_indices, batch_losses)
             )
+            del toks, batch_losses
+            batch_idx = start // per_device_batch_size + 1
+            if empty_cache_every and batch_idx % empty_cache_every == 0 and scorer_device.startswith("cuda"):
+                with torch.cuda.device(scorer_device):
+                    torch.cuda.empty_cache()
             done = min(start + per_device_batch_size, len(assigned))
             if start == 0 or done == len(assigned) or (start // per_device_batch_size) % 20 == 0:
                 log.info(
@@ -349,6 +466,7 @@ def score_samples(
         raise RuntimeError(f"internal scoring error: {missing} samples were not scored")
 
     losses = []
+    dataset_losses: dict[str, list[float]] = collections.defaultdict(list)
     with out_path.open("w") as f:
         for order_idx, ((s_idx, j), loss) in enumerate(zip(cands, losses_by_order)):
             tok = shards[s_idx][j].tolist()
@@ -382,6 +500,8 @@ def score_samples(
             ):
                 if key in shard_meta:
                     row[key] = shard_meta[key]
+            if shard_records:
+                dataset_losses[row.get("dataset", "unknown")].append(float(loss))
             f.write(json.dumps(row) + "\n")
             if order_idx == 0 or (order_idx + 1) % (per_device_batch_size * len(scorers) * 20) == 0:
                 log.info("wrote %d/%d scored samples", order_idx + 1, len(cands))
@@ -395,10 +515,7 @@ def score_samples(
                 torch.cuda.empty_cache()
 
     by_dataset: dict[str, dict] = {}
-    if shard_records:
-        dataset_losses: dict[str, list[float]] = collections.defaultdict(list)
-        for row in jsonl_rows(out_path):
-            dataset_losses[row.get("dataset", "unknown")].append(float(row["loss"]))
+    if dataset_losses:
         for dataset, values in sorted(dataset_losses.items()):
             arr = np.asarray(values, dtype=np.float64)
             by_dataset[dataset] = {

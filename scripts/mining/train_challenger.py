@@ -303,10 +303,19 @@ def sha256_dir(path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Paired eval (mirrors eval_torch.compute_paired_losses + bootstrap)
 # ---------------------------------------------------------------------------
-@torch.no_grad()
+@torch.inference_mode()
 def compute_per_seq_loss(model, token_batches, device, chunk=LM_HEAD_CHUNK):
     """Average per-token cross-entropy per sequence (matches eval_torch)."""
-    input_ids = torch.tensor(token_batches, dtype=torch.long, device=device)
+    if isinstance(token_batches, np.ndarray):
+        if token_batches.dtype != np.int64:
+            token_batches = token_batches.astype(np.int64, copy=False)
+        input_ids = torch.from_numpy(np.ascontiguousarray(token_batches)).to(
+            device=device,
+            non_blocking=True,
+        )
+    else:
+        input_ids = torch.as_tensor(token_batches, dtype=torch.long, device=device)
+    batch_size = input_ids.size(0)
     # Reset stateful arch (Quasar latent memory) before each batch — see
     # eval_torch.compute_paired_losses for rationale. No-op for stock HF archs.
     if hasattr(model, "reset_state"):
@@ -315,7 +324,7 @@ def compute_per_seq_loss(model, token_batches, device, chunk=LM_HEAD_CHUNK):
     hidden = out.last_hidden_state
     lm_head = model.lm_head
     n_pos = input_ids.size(1) - 1
-    total = torch.zeros(len(token_batches), device=device)
+    total = torch.zeros(batch_size, device=device)
     for i in range(0, n_pos, chunk):
         end = min(i + chunk, n_pos)
         logits = lm_head(hidden[:, i:end, :])
@@ -325,9 +334,11 @@ def compute_per_seq_loss(model, token_batches, device, chunk=LM_HEAD_CHUNK):
             labels.reshape(-1),
             reduction="none",
         )
-        total += loss.reshape(len(token_batches), -1).sum(dim=1)
+        total += loss.reshape(batch_size, -1).sum(dim=1)
         del logits, loss
-    return (total / n_pos).cpu().tolist()
+    result = (total / n_pos).detach().cpu().tolist()
+    del input_ids, out, hidden, total
+    return result
 
 
 def filter_indices_by_vocab(shard: np.ndarray, indices: list[int], vocab_size: int) -> tuple[list[int], int]:

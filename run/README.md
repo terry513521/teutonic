@@ -70,11 +70,10 @@ up to 3,000 rows per selected shard.
 Each row preserves the original
 `train_challenger.py` scoring format: `shard`, `idx`, `loss`, `unique_r`,
 `rep_r`, `rep_ng4`, and `tokens`, with dataset metadata added for weighted
-curriculum selection. Step 2 selects shards randomly by default and downloads
-missing dataset shards into `<work>/cache/datasets`. It generates a new seed for
-each run unless you set `SEED`, then selects samples randomly within each
-selected shard. Set `CACHE_ONLY=1` only when you want to restrict selection to
-already cached local shards.
+curriculum selection. Step 2 selects from already cached dataset shards only; run
+`run/download_dataset_shards.sh` before scoring if the cache is empty. It
+generates a new seed for each run unless you set `SEED`, then selects samples
+randomly within each selected shard.
 
 For reproducible shard/sample selection:
 
